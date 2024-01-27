@@ -1,7 +1,7 @@
 import streamlit as st
 import time
 import numpy as np
-st.set_page_config(page_title="Suspended Bridge")
+st.set_page_config(page_title="Suspended Bridge", page_icon="🌉")
 st.markdown("# Suspended Bridge Design Tool")
 st.sidebar.header("Suspended Bridge")
 
