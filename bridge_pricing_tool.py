@@ -1,4 +1,5 @@
 import streamlit as st
+import pandas as pd
 
 st.set_page_config(page_title="Bridge Pricing", page_icon="🌉", layout="wide")
 
@@ -63,8 +64,6 @@ with tab1:
             st.markdown(f"## Estimated Bridge Cost: {bridge_cost/exchange_rate:,.2f} USD")
 
     with col2:
-        import pandas as pd
-
         span_list = list(range(40, 161, 5))
         cost_list = [update_bridge_cost(x) for x in span_list]
         df = pd.DataFrame({'Span (m)': span_list, 'Cost (RWF)': cost_list})
