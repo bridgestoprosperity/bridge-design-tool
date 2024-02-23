@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-import plotly.graph_objs as go
+import plotly.graph_objects as go
 
 st.set_page_config(page_title="Bridge Pricing", page_icon="🌉", layout="wide")
 bridge_cost = 0
