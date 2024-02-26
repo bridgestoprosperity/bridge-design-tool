@@ -172,7 +172,7 @@ header_col1, header_col2 = st.columns(2)
 
 with header_col1:
     st.markdown("# Bridge Cost Estimation Tool")
-    st.markdown("This tool estimates the cost of building a bridge based on the span and the type of bridge. Note that this was produced using data from 2023 and all numbers are a general estimate.")
+    st.markdown("This tool estimates the cost of building a bridge based on the span and the type of bridge. Note, this was produced using data from 2021 - April 2023 and all numbers are a general estimate. Please [contact us](https://bridgestoprosperity.org/contact/) with questions or to learn more about our methodology")
 with header_col2:
     st.image("./assets/b2p-full-logo.png", width=400)
 tab1, tab2 = st.tabs(["Suspension Bridge", "Suspended Bridge"])
