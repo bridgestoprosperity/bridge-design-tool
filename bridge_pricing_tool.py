@@ -168,9 +168,13 @@ def data_category(bridge_type):
         "other": cost[bridge_type]["u_expropriation"]
         }
     return categories
+header_col1, header_col2 = st.columns(2)
 
-st.markdown("# Bridge Cost Estimation Tool")
-st.markdown("This tool estimates the cost of building a bridge based on the span and the type of bridge. Note that this was produced using data from 2023 and all numbers are a general estimate.")
+with header_col1:
+    st.markdown("# Bridge Cost Estimation Tool")
+    st.markdown("This tool estimates the cost of building a bridge based on the span and the type of bridge. Note that this was produced using data from 2023 and all numbers are a general estimate.")
+with header_col2:
+    st.image("./assets/b2p-full-logo.png", width=400)
 tab1, tab2 = st.tabs(["Suspension Bridge", "Suspended Bridge"])
 
 with tab1:
@@ -180,15 +184,15 @@ with tab1:
         span = st.number_input("Estimated bridge span (m)",
                                40, 120, 90, 1, key='span_input_suspension')
         exchange_rate = st.number_input(
-            "🇷🇼 RWF to 🇺🇸 USD exchange rate", 0.00, 1000000.00, 1273.00, 0.01, key='exchange_rate_both_suspension')
+            "RWF to USD exchange rate", 0, 1000000, 1273, 1, key='exchange_rate_both_suspension')
         bridge_cost = update_b_cost(span, "suspension")
         cole, colf = st.columns(2)
         with cole:
             st.markdown(f"## Bridge Cost:")
-            st.success(f"### 🇷🇼 {bridge_cost:,.0f} RWF \n ### 🇺🇸 {bridge_cost / exchange_rate:,.0f} USD")
+            st.success(f"### {bridge_cost:,.0f} RWF \n ### {bridge_cost / exchange_rate:,.0f} USD")
         with colf:
             st.markdown(f"## Cost per Meter:")
-            st.success(f"### 🇷🇼 {(bridge_cost/span):,.0f} RWF/m \n ### 🇺🇸 {((bridge_cost / exchange_rate)/span):,.0f} USD/m")
+            st.success(f"### {(bridge_cost/span):,.0f} RWF/m \n ### {((bridge_cost / exchange_rate)/span):,.0f} USD/m")
         
         # todo make a chart breaking down MATERIALS IN-KIND MATERIALS TOOLS AND EQUIPMENT LABOUR SUPERVISION OVERHEADS OTHER 
         suspension_data = data_category("suspension")
@@ -210,7 +214,7 @@ with tab1:
         st.markdown("## Bridge Cost")
         cola, colb = st.columns(2)
         with cola:
-            span_units = st.radio("Cost per meter or total cost?", ("Cost per meter", "Total cost"), key='span_units_suspension')
+            span_units = st.radio("Cost per meter or total cost?", ("Total cost", "Cost per meter"), key='span_units_suspension')
         with colb:
             exchange = st.radio("Currency?", ("RWF", "USD"), key='exchange_suspension')
         if exchange == "RWF" and span_units == "Cost per meter":
@@ -246,15 +250,15 @@ with tab2:
         span = st.number_input("Estimated bridge span (m)",
                                40, 120, 90, 1, key='span_input_suspended')
         exchange_rate = st.number_input(
-            "🇷🇼 RWF to 🇺🇸 USD exchange rate", 0.00, 1000000.00, 1273.00, 0.01, key='exchange_rate_both_suspended')
+            "RWF to USD exchange rate", 0, 1000000, 1273, 1, key='exchange_rate_both_suspended')
         bridge_cost = update_b_cost(span, "suspended")
         colg, colh = st.columns(2)
         with colg:
             st.markdown(f"## Bridge Cost:")
-            st.success(f"### 🇷🇼 {bridge_cost:,.0f} RWF \n ### 🇺🇸 {bridge_cost / exchange_rate:,.2f} USD")
+            st.success(f"### {bridge_cost:,.0f} RWF \n ### {bridge_cost / exchange_rate:,.2f} USD")
         with colh:
             st.markdown(f"## Cost per Meter:")
-            st.success(f"### 🇷🇼 {(bridge_cost/span):,.0f} RWF/m \n ### 🇺🇸 {((bridge_cost / exchange_rate)/span):,.0f} USD/m")
+            st.success(f"### {(bridge_cost/span):,.0f} RWF/m \n ### {((bridge_cost / exchange_rate)/span):,.0f} USD/m")
         
         suspended_data = data_category("suspended")
         data = [
@@ -272,10 +276,10 @@ with tab2:
 
         
     with col4:
-        st.markdown("## Bridge Cost Per Meter")
+        st.markdown("## Bridge Cost")
         colb, colc = st.columns(2)
         with colb:
-            span_units = st.radio("Cost per meter or total cost?", ("Cost per meter", "Total cost"), key='span_units_suspended')
+            span_units = st.radio("Cost per meter or total cost?", ("Total cost", "Cost per meter"), key='span_units_suspended')
         with colc:
             exchange = st.radio("Currency?", ("RWF", "USD"), key='exchange_suspended')
         if exchange == "RWF" and span_units == "Cost per meter":
@@ -289,7 +293,7 @@ with tab2:
         
     st.markdown("## Assumptions & Recommendations")
     st.info("""
-    - Anchors and foundations and Ramps are an averaged lump sum, whereas they are dependent on the length of bridge2. A complete detailed study or tabulated ranges for different size foundations and lengths is needed to come up with a better function of Concrete works vs. Length.
+    - Anchors and foundations and Ramps are an averaged lump sum, whereas they are dependent on the length of the bridge. A complete detailed study or tabulated ranges for different size foundations and lengths is needed to come up with a better function of Concrete works vs. Length.
     - The Number of Tiers vs. Length of bridge needs to be further investigated/studied to differentiate. Similar to the point above.
     - 10mm Steel Reinforcement used for suspenders is included in the reinforcement lump sum, whereas the 10mm suspender bars are a function of the length. Differentiate these in the future to determine quantities of 10mm suspenders and 10mm reinforcement used in foundations.
     - 10mm Wires used in the ramp fencing are included in the 10mm handrail/fixation cable costed per meter, but the 10mm wires used in the ramp are a lump sum. Differentiate these in the future.
