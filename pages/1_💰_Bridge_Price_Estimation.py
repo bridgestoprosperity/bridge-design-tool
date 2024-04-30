@@ -3,6 +3,7 @@ import pandas as pd
 import plotly.graph_objects as go
 
 st.set_page_config(page_title="Bridge Pricing", page_icon="🌉", layout="wide")
+st.sidebar.header("Bridge Pricing")
 bridge_cost = 0
 cost = {"suspension": {
         "a_concrete_works": 7200000,
