@@ -18,14 +18,14 @@ bridge_data = {
         "name": "Suspended Cable Bridge",
         "Maximum Weight": max_weight_options[1],
         "Terrain Profile": [terrain_options[2]],
-        "Minimum Span": 45,
+        "Minimum Span": 40,
         "Maximum Span": 120,
     },
     "Suspension Bridge": {
         "name": "Suspension Bridge",
         "Maximum Weight": max_weight_options[1],
         "Terrain Profile": [terrain_options[2]],
-        "Minimum Span": 45,
+        "Minimum Span": 40,
         "Maximum Span": 150,
     },
     "Timber Log Footbridge": {
@@ -59,7 +59,7 @@ bridge_data = {
     "Unvented Ford/Drift": {
         "name": "Unvented Ford/Drift",
         "Maximum Weight": max_weight_options[2],
-        "Terrain Profile": ["Narrow & Steep", "Wide & Flat"],
+        "Terrain Profile": [terrain_options[1], terrain_options[3]],
         "Minimum Span": 1,
         "Maximum Span": 10,
     },
@@ -105,8 +105,8 @@ with col1:
     selected_terrain = st.radio(
         "Select the terrain profile of the bridge location", options=terrain_options
     )
-    # with st.popover("More information"):
-    #     st.markdown("here are images of typical terrain profiles")
+    with st.popover("More information"):
+        st.markdown("here are images of typical terrain profiles")
 with col2:
     st.markdown("### **Traffic Crossing**")
     selected_traffic = st.radio(
@@ -114,9 +114,6 @@ with col2:
     )
 with col3:
     st.markdown("### **Approximate Span**")
-
-    with st.popover("more information"):
-        st.markdown("here are images of typical spans of bridges")
     selected_span = st.number_input(
         "Enter the estimated span of the bridge in meters",
         min_value=1,
