@@ -127,6 +127,8 @@ with col3:
     if st.button("**Recommend Bridge Type**", type="primary", use_container_width=True):
         print(selected_span, selected_traffic, selected_terrain)
         recommended_bridge_types = recommended_bridge(int(selected_span), max_weight_options.index(selected_traffic), selected_terrain)
+        if recommended_bridge_types == []:
+            recommended_bridge_types = [None]
         specs_chart = generate_chart(bridge_data, recommended_bridge_types)
         print(recommended_bridge_types)
 
@@ -134,9 +136,12 @@ with col3:
 
 
 if recommended_bridge_types:
-    st.write(f"Based on the information you provided, we recommend the following bridge types:")
-    for bridge in recommended_bridge_types:
-        st.write(f"🌉 {bridge}")
-    st.write("Please consult with a structural engineer to confirm the recommended bridge type")
+    if None in recommended_bridge_types:
+        st.write("There is not a bridge type that matches your selected criteria. Review the table below for more information around the constraints of different bridge types.")
+    else:
+        st.write(f"Based on the information you provided, we recommend the following bridge types:")
+        for bridge in recommended_bridge_types:
+            st.write(f"🌉 {bridge}")
+        st.write("Please consult with a structural engineer to confirm the recommended bridge type")
 if specs_chart:
     st.write(specs_chart)
