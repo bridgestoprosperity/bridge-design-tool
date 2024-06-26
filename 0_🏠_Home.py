@@ -4,6 +4,7 @@ st.set_page_config(
     page_title="Home",
     page_icon="🌉",
 )
+st.logo("./assets/b2plogo.png")
 st.sidebar.header("Home")
 st.write("# Welcome to Bridges to Prosperity's Bridge Planning Tool")
 
