@@ -118,7 +118,20 @@ with col1:
         "Select the terrain profile of the bridge location", options=terrain_options
     )
     with st.popover("More information"):
-        st.markdown("here are images of typical terrain profiles")
+        st.markdown("Terrain profiles can have a significant impact on the type of bridge that is most suitable. the pictures below show examples of different terrain profiles.")
+        image1, image2, image3, image4 = st.columns(4)
+        with image1:
+            st.image("https://placehold.co/500x500")
+            st.image("https://placehold.co/500x500", caption="Narrow & Steep Terrain")
+        with image2:
+            st.image("https://placehold.co/500x500")
+            st.image("https://placehold.co/500x500", caption="Narrow & Wide Terrain")
+        with image3:
+            st.image("https://placehold.co/500x500")
+            st.image("https://placehold.co/500x500", caption="Wide & Steep Terrain")
+        with image4:
+            st.image("https://placehold.co/500x500")
+            st.image("https://placehold.co/500x500", caption="Wide & Flat Terrain")
 with col2:
     st.markdown("### **Traffic Crossing**")
     selected_traffic = st.radio(
@@ -148,6 +161,16 @@ if recommended_bridge_types:
         st.write("There is not a bridge type that matches your selected criteria. Review the table below for more information around the constraints of different bridge types.")
     else:
         st.write("Based on the information you provided, we recommend the following bridge types: " + ", ".join([f"**{bridge}**" for bridge in recommended_bridge_types]))
+        
+        # Create columns based on the number of recommended bridge types
+        columns = st.columns(len(recommended_bridge_types))
+
+        # Place each bridge image in its own column
+        for i, bridge in enumerate(recommended_bridge_types):
+            with columns[i]:
+                st.image("https://placehold.co/500x500", caption=bridge_data[bridge]["name"])
+
+
 if specs_chart:
     st.write(specs_chart)
-    st.info("Please consult with a structural engineer to confirm the recommended bridge type.")
+    st.warning("Please consult with a structural engineer to confirm the recommended bridge type.")
