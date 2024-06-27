@@ -11,75 +11,88 @@ st.sidebar.header("Updated Bridge Design Helper")
 st.write("# Updated Bridge Design Helper")
 st.write("Add information you know about your bride design")
 
-max_weight_options = [ "🚶 Pedestrian (1kpa)","🏍️ Motorcycle (4kpa)", "🚗 Automobile (10kpa)", "🚚 Commercial Truck (20kpa)"]
+max_weight_options = [ "🚶 🏍️  Pedestrian/Motorcycle (4kpa)", "🚗 Light Vehicle (10kpa)", "🚚 Heavy Vehicle (20kpa)"]
 terrain_options = ["Steep", "Flat"]
 bridge_data = {
     "Suspended Cable Bridge": {
         "name": "Suspended Cable Bridge",
-        "Maximum Weight": max_weight_options[1],
+        "Maximum Weight": max_weight_options[0],
         "Terrain Profile": [terrain_options[0]],
         "Minimum Span": 40,
         "Maximum Span": 120,
+        "Approximate Cost": "💸",
     },
     "Suspension Bridge": {
         "name": "Suspension Bridge",
-        "Maximum Weight": max_weight_options[1],
+        "Maximum Weight": max_weight_options[0],
         "Terrain Profile": [terrain_options[0], terrain_options[1]],
         "Minimum Span": 40,
         "Maximum Span": 150,
+        "Approximate Cost": "💸",
     },
     "Timber Log Footbridge": {
         "name": "Timber Log Footbridge",
-        "Maximum Weight": max_weight_options[1],
+        "Maximum Weight": max_weight_options[0],
         "Terrain Profile": [terrain_options[0]],
         "Minimum Span": 5,
         "Maximum Span": 15,
+        "Approximate Cost": "💸",
     },
     "Single Cell Box Culvert": {
         "name": "Single Cell Box Culvert",
-        "Maximum Weight": max_weight_options[2],
+        "Maximum Weight": max_weight_options[1],
         "Terrain Profile": [terrain_options[1]],
         "Minimum Span": 5,
         "Maximum Span": 10,
+        "Approximate Cost": "💸",
     },
     "Sawn Timber Bridge": {
         "name": "Sawn Timber Bridge",
-        "Maximum Weight": max_weight_options[2],
+        "Maximum Weight": max_weight_options[1],
         "Terrain Profile": [terrain_options[0]],
         "Minimum Span": 10,
         "Maximum Span": 20,
+        "Approximate Cost": "💸",
     },
     "Single Span Masonry Stone Arch Bridge": {
         "name": "Single Span Masonry Stone Arch Bridge",
-        "Maximum Weight": max_weight_options[3],
+        "Maximum Weight": max_weight_options[2],
         "Terrain Profile": [terrain_options[0]],
         "Minimum Span": 5,
         "Maximum Span": 15,
+        "Approximate Cost": "💸",
     },
-    "Unvented Ford/Drift": {
-        "name": "Unvented Ford/Drift",
-        "Maximum Weight": max_weight_options[2],
+    "Unvented Ford or Drift": {
+        "name": "Unvented Ford or Drift",
+        "Maximum Weight": max_weight_options[1],
         "Terrain Profile": [terrain_options[1]],
         "Minimum Span": 1,
         "Maximum Span": 10,
+        "Approximate Cost": "💸",
     },
 }
 
 recommended_bridges = []
 recommended_bridge_types = []
 specs_chart = None
+asterik_value = False
 def recommended_bridge(selected_span, selected_traffic, selected_terrain):
     recommended_bridges = []
     for bridge, data in bridge_data.items():
-        print ("bridge: ", bridge)
         if selected_span >= data["Minimum Span"] and selected_span <= data["Maximum Span"]:
-            print ("selected_span: ", selected_span)
             if selected_traffic <= max_weight_options.index(data["Maximum Weight"]):
-                print ("selected_traffic: ", selected_traffic)
                 if selected_terrain in data["Terrain Profile"]:
-                    print ("selected_terrain: ", selected_terrain)
                     recommended_bridges.append(data["name"])
     return recommended_bridges
+
+def asterik_adder(df, selected_span):
+    asterik_value = False
+    for i in range(len(df)):
+        if df.index[i] == "Single Cell Box Culvert" or df.index[i] == "Single Span Masonry Stone Arch Bridge":
+            if int(df.iloc[i]["Maximum Span"]) < selected_span:
+                df.iloc[i, df.columns.get_loc("Maximum Span")] = df.iloc[i]["Maximum Span"] + "*"
+                asterik_value = True
+    return df, asterik_value
 
 def generate_chart(bridge_data, rec_bridges, selected_span, selected_traffic, selected_terrain):
     df = pd.DataFrame(bridge_data).T
@@ -87,8 +100,12 @@ def generate_chart(bridge_data, rec_bridges, selected_span, selected_traffic, se
     df["Maximum Span"] = df["Maximum Span"].astype(str)
     df["Maximum Weight"] = df["Maximum Weight"].astype(str)
     df["Terrain Profile"] = df["Terrain Profile"]
+    df["Approximate Cost"] = df["Approximate Cost"]
     df.index.name = "Bridge Type"
     df = df.drop(columns=["name"])
+
+    # Apply asterisks before styling
+    df, asterik_value = asterik_adder(df, selected_span)
 
     def highlight_row(s):
         is_rec_bridge = s.name in rec_bridges
@@ -99,7 +116,7 @@ def generate_chart(bridge_data, rec_bridges, selected_span, selected_traffic, se
         for row in range(len(x)):
             if df.index[row] not in rec_bridges and selected_traffic > max_weight_options.index(df.iloc[row]["Maximum Weight"]):
                 df_styled.iloc[row, df.columns.get_loc("Maximum Weight")] = 'background-color: #e2a7a7'
-            if df.index[row] not in rec_bridges and selected_span > int(df.iloc[row]["Maximum Span"]):
+            if df.index[row] not in rec_bridges and selected_span > int(df.iloc[row]["Maximum Span"].rstrip('*')):  # Remove '*' for comparison
                 df_styled.iloc[row, df.columns.get_loc("Maximum Span")] = 'background-color: #e2a7a7'
             if df.index[row] not in rec_bridges and selected_span < int(df.iloc[row]["Minimum Span"]):
                 df_styled.iloc[row, df.columns.get_loc("Minimum Span")] = 'background-color: #e2a7a7'
@@ -109,7 +126,8 @@ def generate_chart(bridge_data, rec_bridges, selected_span, selected_traffic, se
 
     styled_df = df.style.apply(highlight_row, axis=1).apply(highlight_cell, axis=None)
 
-    return styled_df
+    return styled_df, asterik_value
+
 
 col1, col2, col3 = st.columns(3)
 with col1:
@@ -146,15 +164,11 @@ with col3:
         value=50,
     )
     if st.button("**Recommend Bridge Type**", type="primary", use_container_width=True):
-        print(selected_span, selected_traffic, selected_terrain)
         recommended_bridge_types = recommended_bridge(int(selected_span), max_weight_options.index(selected_traffic), selected_terrain)
-        if recommended_bridge_types == []:
-            recommended_bridge_types = [None]
-        specs_chart = generate_chart(bridge_data, recommended_bridge_types, int(selected_span), max_weight_options.index(selected_traffic), selected_terrain)
-        print(recommended_bridge_types)
+    if not recommended_bridge_types:
+        recommended_bridge_types = [None]
 
-
-
+    specs_chart, asterik_value = generate_chart(bridge_data, recommended_bridge_types, int(selected_span), max_weight_options.index(selected_traffic), selected_terrain)
 
 if recommended_bridge_types:
     if None in recommended_bridge_types:
@@ -168,9 +182,15 @@ if recommended_bridge_types:
         # Place each bridge image in its own column
         for i, bridge in enumerate(recommended_bridge_types):
             with columns[i]:
-                st.image("https://placehold.co/500x500", caption=bridge_data[bridge]["name"])
+                st.image("./assets/"+bridge+".png", caption=bridge_data[bridge]["name"])
 
 
-if specs_chart:
+if specs_chart is not None:
     st.write(specs_chart)
-    st.warning("Please consult with a structural engineer to confirm the recommended bridge type.")
+    if asterik_value is True:
+        print(asterik_value)
+        st.write("*_Longer bridging structures can be created using this deisgn by adding further spans back-to-back. This would require foundations in the river bed necessitating specialist input._")
+    else:
+        print(asterik_value)
+
+st.warning("Please consult with a structural engineer to confirm the recommended bridge type.")
