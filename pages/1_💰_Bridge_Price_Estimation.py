@@ -173,9 +173,9 @@ header_col1, header_col2 = st.columns(2)
 
 with header_col1:
     st.markdown("# Bridge Cost Estimation Tool")
-    st.markdown("This tool estimates the cost of building a bridge based on the span and the type of bridge. Note, this was produced using data from 2021 - April 2023 and all numbers are a general estimate. Please [contact us](https://bridgestoprosperity.org/contact/) with questions or to learn more about our methodology")
+    st.markdown("This tool estimates the cost of building a bridge based on the span and the type of bridge. Note, this was produced using data from 2021 - April 2023 and all numbers are a general estimate. Please [contact us](https://fika.org/contact/) with questions or to learn more about our methodology")
 with header_col2:
-    st.image("./assets/b2p-full-logo.png", width=400)
+    st.image("./assets/fika-full-logo.png", width=400)
 tab1, tab2 = st.tabs(["Suspension Bridge", "Suspended Bridge"])
 
 with tab1:
@@ -238,8 +238,8 @@ with tab1:
         - Cables and clips are in-kind materials and are budgeted line items - data for actual costs need to be investigated.
         - Misc Building Materials weren't clearly assigned, so the 500K is an estimated figure; needs checking.
         - Transportation and site setup - needs further cost investigation as there's a huge variance between budget and actual. In the future, these costs could be based upon the distance from the capital.
-        - Detailed costing of the engineering and B2P office Staff needs to be investigated.
-        - Other B2P Overheads need to be budgeted / Rent / Office Costs etc., including Warehouse / surveying.
+        - Detailed costing of the engineering and Fika office Staff needs to be investigated.
+        - Other Fika Overheads need to be budgeted / Rent / Office Costs etc., including Warehouse / surveying.
         """)
 
 
@@ -302,6 +302,6 @@ with tab2:
     - Cables and clips are in-kind materials and are budgeted line items - data for actual costs need to be investigated.
     - Misc Building Materials weren't clearly assigned so the 1300K is an estimated figure; needs checking.
     - Transportation and site setup - needs further cost investigation as there is a huge variance between budget and actual. In the future, these costs could be based upon the distance from the capital.
-    - Detailed costing of the engineering and B2P office Staff needs to be investigated.
-    - Other B2P Overheads need to be budgeted - Rent / Office Costs etc., including Warehouse / surveying.
+    - Detailed costing of the engineering and Fika office Staff needs to be investigated.
+    - Other Fika Overheads need to be budgeted - Rent / Office Costs etc., including Warehouse / surveying.
     """)
