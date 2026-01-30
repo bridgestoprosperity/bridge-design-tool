@@ -4,11 +4,11 @@ import pandas as pd
 st.set_page_config(page_title="Bridge Design Helper", page_icon="🌉", layout="wide")
 
 # Sidebar stuff
-st.logo("./assets/b2plogo.png")
-st.sidebar.header("Updated Bridge Design Helper")
+st.logo("./assets/fikalogo.png")
+st.sidebar.header("Bridge Type Recommender")
 
 # initial main page content
-st.write("# Updated Bridge Design Helper")
+st.write("# Bridge Type Recommender")
 st.write("Add information you know about your bride design")
 
 max_weight_options = [ "🚶 🏍️  Pedestrian/Motorcycle (4kpa)", "🚗 Light Vehicle (10kpa)", "🚚 Heavy Vehicle (20kpa)"]
