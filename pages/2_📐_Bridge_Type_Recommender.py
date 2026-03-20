@@ -165,10 +165,11 @@ with col3:
     )
     if st.button("**Recommend Bridge Type**", type="primary", use_container_width=True):
         recommended_bridge_types = recommended_bridge(int(selected_span), max_weight_options.index(selected_traffic), selected_terrain)
+        specs_chart, asterik_value = generate_chart(bridge_data, recommended_bridge_types, int(selected_span), max_weight_options.index(selected_traffic), selected_terrain)
+
     if not recommended_bridge_types:
         recommended_bridge_types = [None]
 
-    specs_chart, asterik_value = generate_chart(bridge_data, recommended_bridge_types, int(selected_span), max_weight_options.index(selected_traffic), selected_terrain)
 
 if recommended_bridge_types:
     if None in recommended_bridge_types:
@@ -188,9 +189,6 @@ if recommended_bridge_types:
 if specs_chart is not None:
     st.write(specs_chart)
     if asterik_value is True:
-        print(asterik_value)
         st.write("*_Longer bridging structures can be created using this deisgn by adding further spans back-to-back. This would require foundations in the river bed necessitating specialist input._")
-    else:
-        print(asterik_value)
 
-st.warning("Please consult with a structural engineer to confirm the recommended bridge type.")
+    st.warning("Please consult with a structural engineer to confirm the recommended bridge type.")
