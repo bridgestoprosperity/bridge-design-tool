@@ -628,7 +628,7 @@ st.dataframe(
     },
 )
 
-with st.expander("Section 4: Source Data and Formula Inputs", expanded=False):
+if False:  # Keep Section 4 code for later, but hide it from the UI for now.
     st.markdown("### RNTI COST SOURCE DATA — Verifiable Sources with Integrated Blended Averages")
 
     grouped_source_frames = []
