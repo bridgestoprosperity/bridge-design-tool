@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 import re
 
@@ -10,6 +11,7 @@ st.logo("./assets/fikalogo.png")
 st.sidebar.header("RNTI Budget Calculator")
 
 WORKBOOK_PATH = Path("./Networked Transport Infrastructure Budget Allocation Tool V2.xlsx")
+DATA_JSON_PATH = Path("./data/rnti_budget_calculator_data.json")
 
 FALLBACK_SOURCE_ROW_GROUPS = {
     25: [7, 8, 9, 10],
@@ -38,7 +40,14 @@ FALLBACK_SOURCE_ROW_GROUPS = {
 }
 
 
-def parse_average_source_rows(formula: str | None, col_letter: str) -> list[int]:
+def normalize_cell_ref(ref: str) -> str:
+    ref = ref.strip().replace("$", "")
+    if "!" in ref:
+        ref = ref.split("!", 1)[1]
+    return ref
+
+
+def extract_average_refs(formula: str | None) -> list[str]:
     if not isinstance(formula, str) or "AVERAGE(" not in formula.upper():
         return []
 
@@ -46,46 +55,109 @@ def parse_average_source_rows(formula: str | None, col_letter: str) -> list[int]
     if not match:
         return []
 
-    inside = match.group(1).replace("$", "")
+    inside = match.group(1)
     refs = [part.strip() for part in inside.split(",") if part.strip()]
-    rows: list[int] = []
+    expanded: list[str] = []
 
     for ref in refs:
         if ":" in ref:
-            start_ref, end_ref = ref.split(":", 1)
-            start_match = re.search(rf"{col_letter}(\d+)", start_ref, flags=re.IGNORECASE)
-            end_match = re.search(rf"{col_letter}(\d+)", end_ref, flags=re.IGNORECASE)
-            if start_match and end_match:
-                start_row = int(start_match.group(1))
-                end_row = int(end_match.group(1))
-                low, high = sorted((start_row, end_row))
-                rows.extend(range(low, high + 1))
-        else:
-            single_match = re.search(rf"{col_letter}(\d+)", ref, flags=re.IGNORECASE)
-            if single_match:
-                rows.append(int(single_match.group(1)))
+            start_ref_raw, end_ref_raw = ref.split(":", 1)
+            start_ref = normalize_cell_ref(start_ref_raw)
+            end_ref = normalize_cell_ref(end_ref_raw)
+            start_match = re.match(r"([A-Za-z]+)(\d+)", start_ref)
+            end_match = re.match(r"([A-Za-z]+)(\d+)", end_ref)
+            if not start_match or not end_match:
+                continue
 
+            start_col, start_row = start_match.group(1).upper(), int(start_match.group(2))
+            end_col, end_row = end_match.group(1).upper(), int(end_match.group(2))
+            if start_col != end_col:
+                continue
+
+            low, high = sorted((start_row, end_row))
+            expanded.extend([f"{start_col}{row}" for row in range(low, high + 1)])
+        else:
+            single_ref = normalize_cell_ref(ref)
+            if re.match(r"[A-Za-z]+\d+", single_ref):
+                expanded.append(single_ref.upper())
+
+    return sorted(set(expanded))
+
+
+def extract_sheet_cell_row(formula: str | None, col_letter: str) -> int | None:
+    if not isinstance(formula, str):
+        return None
+    match = re.search(rf"!\$?{col_letter}(\d+)", formula, flags=re.IGNORECASE)
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def compile_excel_formula(formula: str | None):
+    """Compile selected Excel formulas into Python callables.
+
+    Supported patterns:
+    - IFERROR(ROUND(AVERAGE(...),0),"")
+    - IFERROR(ROUND((A1+B1)/2,0),"")
+    """
+    if not isinstance(formula, str):
+        return None
+
+    avg_refs = extract_average_refs(formula)
+    if avg_refs:
+        def eval_average(resolve_ref):
+            values = [resolve_ref(ref) for ref in avg_refs]
+            return calculate_blended_average(pd.Series(values))
+
+        return eval_average
+
+    normalized = formula.replace("$", "")
+    mid_match = re.search(
+        r"ROUND\(\s*\(?\s*([A-Za-z]+\d+)\s*\+\s*([A-Za-z]+\d+)\s*\)?\s*/\s*2\s*,\s*0\s*\)",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    if mid_match:
+        left_ref = normalize_cell_ref(mid_match.group(1)).upper()
+        right_ref = normalize_cell_ref(mid_match.group(2)).upper()
+
+        def eval_mid(resolve_ref):
+            return calculate_source_mid(resolve_ref(left_ref), resolve_ref(right_ref))
+
+        return eval_mid
+
+    return None
+
+
+def parse_average_source_rows(formula: str | None, col_letter: str) -> list[int]:
+    refs = extract_average_refs(formula)
+    rows: list[int] = []
+    for ref in refs:
+        match = re.match(r"([A-Za-z]+)(\d+)", ref)
+        if not match:
+            continue
+        col, row = match.group(1).upper(), int(match.group(2))
+        if col == col_letter.upper():
+            rows.append(row)
     return sorted(set(rows))
 
 
-def derive_source_row_groups(ws, ws_source) -> dict[int, list[int]]:
+def derive_source_row_groups(ws_budget_formula, ws_source_formula) -> dict[int, list[int]]:
     row_groups: dict[int, list[int]] = {}
 
     for row in range(24, 51):
-        item_number = ws[f"A{row}"].value
+        item_number = ws_budget_formula[f"A{row}"].value
         if item_number is None:
             continue
 
-        min_formula = ws[f"D{row}"].value
+        min_formula = ws_budget_formula[f"D{row}"].value
         source_rows: list[int] = []
 
-        if isinstance(min_formula, str):
-            blended_match = re.search(r"!\$?C(\d+)", min_formula)
-            if blended_match:
-                blended_row = int(blended_match.group(1))
-                source_rows = parse_average_source_rows(ws_source[f"C{blended_row}"].value, "C")
-                if not source_rows:
-                    source_rows = parse_average_source_rows(ws_source[f"D{blended_row}"].value, "D")
+        blended_row = extract_sheet_cell_row(min_formula, "C")
+        if blended_row is not None:
+            source_rows = parse_average_source_rows(ws_source_formula[f"C{blended_row}"].value, "C")
+            if not source_rows:
+                source_rows = parse_average_source_rows(ws_source_formula[f"D{blended_row}"].value, "D")
 
         if not source_rows:
             source_rows = FALLBACK_SOURCE_ROW_GROUPS.get(row, [])
@@ -96,18 +168,18 @@ def derive_source_row_groups(ws, ws_source) -> dict[int, list[int]]:
     return row_groups
 
 
-def derive_budget_to_source_blended_row(ws) -> dict[int, int]:
+def derive_budget_to_source_blended_row(ws_budget_formula) -> dict[int, int]:
     links: dict[int, int] = {}
     for row in range(24, 51):
-        item_number = ws[f"A{row}"].value
+        item_number = ws_budget_formula[f"A{row}"].value
         if item_number is None:
             continue
-        min_formula = ws[f"D{row}"].value
+        min_formula = ws_budget_formula[f"D{row}"].value
         if not isinstance(min_formula, str):
             continue
-        blended_match = re.search(r"!\$?C(\d+)", min_formula)
-        if blended_match:
-            links[row] = int(blended_match.group(1))
+        blended_row = extract_sheet_cell_row(min_formula, "C")
+        if blended_row is not None:
+            links[row] = blended_row
     return links
 
 
@@ -118,15 +190,81 @@ def source_group_display_order(source_row_groups: dict[int, list[int]]) -> list[
     )
 
 
+def normalize_json_value(value):
+    if value is None:
+        return None
+    if isinstance(value, (str, int, float, bool)):
+        if isinstance(value, float) and pd.isna(value):
+            return None
+        return value
+
+    try:
+        if pd.isna(value):
+            return None
+    except TypeError:
+        pass
+
+    if hasattr(value, "item"):
+        try:
+            return value.item()
+        except Exception:
+            return str(value)
+
+    return str(value)
+
+
+def dataframe_to_json_records(df: pd.DataFrame) -> list[dict]:
+    records = df.to_dict(orient="records")
+    return [
+        {k: normalize_json_value(v) for k, v in record.items()}
+        for record in records
+    ]
+
+
+def save_budget_data_json(
+    json_path: str,
+    intro_title: str,
+    intro_text: str,
+    disclaimer: str,
+    defaults: dict,
+    components_df: pd.DataFrame,
+    source_df: pd.DataFrame,
+    source_row_groups: dict[int, list[int]],
+    budget_to_source_blended_row: dict[int, int],
+    section_3_formulas: dict[str, str | None],
+):
+    json_file = Path(json_path)
+    json_file.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "intro_title": intro_title,
+        "intro_text": intro_text,
+        "disclaimer": disclaimer,
+        "defaults": defaults,
+        "components": dataframe_to_json_records(components_df),
+        "source": dataframe_to_json_records(source_df),
+        "source_row_groups": {str(k): v for k, v in source_row_groups.items()},
+        "budget_to_source_blended_row": {
+            str(k): v for k, v in budget_to_source_blended_row.items()
+        },
+        "section_3_formulas": section_3_formulas,
+    }
+    json_file.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
 @st.cache_data
-def load_budget_calculator_data(file_path: str, workbook_mtime: float):
+def load_budget_calculator_data_from_workbook(
+    file_path: str,
+    workbook_mtime: float,
+    json_path: str,
+):
     wb = load_workbook(file_path, data_only=True)
     wb_formula = load_workbook(file_path, data_only=False)
     ws = wb["Budget Calculator"]
     ws_source = wb["Source Data - In Progress"]
+    ws_formula = wb_formula["Budget Calculator"]
     ws_source_formula = wb_formula["Source Data - In Progress"]
-    source_row_groups = derive_source_row_groups(ws, ws_source)
-    budget_to_source_blended_row = derive_budget_to_source_blended_row(ws)
+    source_row_groups = derive_source_row_groups(ws_formula, ws_source_formula)
+    budget_to_source_blended_row = derive_budget_to_source_blended_row(ws_formula)
 
     def source_url_from_row(source_row: int):
         cell = ws_source_formula[f"F{source_row}"]
@@ -138,7 +276,25 @@ def load_budget_calculator_data(file_path: str, workbook_mtime: float):
             return f"#{cell.hyperlink.location}"
         return None
 
-    def blended_costs_from_source_rows(source_rows: list[int]):
+    def blended_costs_from_source_rows(source_rows: list[int], blended_row: int | None):
+        def resolve_source_ref(ref: str):
+            normalized_ref = normalize_cell_ref(ref)
+            return ws_source[normalized_ref].value
+
+        if blended_row is not None:
+            min_formula_fn = compile_excel_formula(ws_source_formula[f"C{blended_row}"].value)
+            max_formula_fn = compile_excel_formula(ws_source_formula[f"D{blended_row}"].value)
+            mid_formula_fn = compile_excel_formula(ws_source_formula[f"E{blended_row}"].value)
+
+            if min_formula_fn and max_formula_fn:
+                min_cost = min_formula_fn(resolve_source_ref)
+                max_cost = max_formula_fn(resolve_source_ref)
+                if mid_formula_fn:
+                    mid_cost = mid_formula_fn(resolve_source_ref)
+                else:
+                    mid_cost = calculate_source_mid(min_cost, max_cost)
+                return min_cost, max_cost, mid_cost
+
         low_values = [ws_source[f"C{r}"].value for r in source_rows]
         high_values = [ws_source[f"D{r}"].value for r in source_rows]
 
@@ -159,6 +315,16 @@ def load_budget_calculator_data(file_path: str, workbook_mtime: float):
         "maintenance_pct": float(ws["C16"].value or 0),
     }
 
+    section_3_formulas = {
+        "total_infrastructure_cost": ws_formula["C55"].value,
+        "capital_budget_available": ws_formula["C56"].value,
+        "remaining_capital_budget": ws_formula["C57"].value,
+        "pct_capital_budget_used": ws_formula["C58"].value,
+        "maintenance_reserve": ws_formula["C59"].value,
+        "total_estimated_rnti_investment": ws_formula["C60"].value,
+        "pct_total_corridor_project": ws_formula["C61"].value,
+    }
+
     section_name = ""
     items = []
     for row in range(24, 51):
@@ -173,7 +339,8 @@ def load_budget_calculator_data(file_path: str, workbook_mtime: float):
             continue
 
         source_rows = source_row_groups.get(row, [])
-        min_cost, max_cost, mid_cost = blended_costs_from_source_rows(source_rows)
+        blended_row = extract_sheet_cell_row(ws_formula[f"D{row}"].value, "C")
+        min_cost, max_cost, mid_cost = blended_costs_from_source_rows(source_rows, blended_row)
 
         items.append(
             {
@@ -225,6 +392,19 @@ def load_budget_calculator_data(file_path: str, workbook_mtime: float):
             )
 
     source_df = pd.DataFrame(source_records)
+    save_budget_data_json(
+        json_path,
+        intro_title,
+        intro_text,
+        disclaimer,
+        defaults,
+        components_df,
+        source_df,
+        source_row_groups,
+        budget_to_source_blended_row,
+        section_3_formulas,
+    )
+
     return (
         intro_title,
         intro_text,
@@ -234,6 +414,38 @@ def load_budget_calculator_data(file_path: str, workbook_mtime: float):
         source_df,
         source_row_groups,
         budget_to_source_blended_row,
+        section_3_formulas,
+    )
+
+
+@st.cache_data
+def load_budget_calculator_data_from_json(json_path: str, json_mtime: float):
+    payload = json.loads(Path(json_path).read_text(encoding="utf-8"))
+    intro_title = payload.get("intro_title", "")
+    intro_text = payload.get("intro_text", "")
+    disclaimer = payload.get("disclaimer", "")
+    defaults = payload.get("defaults", {})
+    components_df = pd.DataFrame(payload.get("components", []))
+    source_df = pd.DataFrame(payload.get("source", []))
+    source_row_groups = {
+        int(k): v for k, v in payload.get("source_row_groups", {}).items()
+    }
+    budget_to_source_blended_row = {
+        int(k): int(v)
+        for k, v in payload.get("budget_to_source_blended_row", {}).items()
+    }
+    section_3_formulas = payload.get("section_3_formulas", {})
+
+    return (
+        intro_title,
+        intro_text,
+        disclaimer,
+        defaults,
+        components_df,
+        source_df,
+        source_row_groups,
+        budget_to_source_blended_row,
+        section_3_formulas,
     )
 
 
@@ -321,25 +533,91 @@ def calculate_blended_average(values: pd.Series):
     return float(round(numeric_values.mean(), 0))
 
 
-if not WORKBOOK_PATH.exists():
-    st.error("Workbook file not found in the project root.")
-    st.stop()
+def parse_sum_rows(formula: str | None, col_letter: str) -> list[int]:
+    if not isinstance(formula, str) or "SUM(" not in formula.upper():
+        return []
 
-(
-    intro_title,
-    intro_text,
-    disclaimer,
-    defaults,
-    components_df,
-    source_df,
-    source_row_groups,
-    budget_to_source_blended_row,
-) = load_budget_calculator_data(str(WORKBOOK_PATH), WORKBOOK_PATH.stat().st_mtime)
+    match = re.search(r"SUM\((.*?)\)", formula, flags=re.IGNORECASE)
+    if not match:
+        return []
+
+    refs = [part.strip() for part in match.group(1).split(",") if part.strip()]
+    rows: list[int] = []
+    for ref in refs:
+        if ":" in ref:
+            start_ref_raw, end_ref_raw = ref.split(":", 1)
+            start_ref = normalize_cell_ref(start_ref_raw)
+            end_ref = normalize_cell_ref(end_ref_raw)
+            start_match = re.match(r"([A-Za-z]+)(\d+)", start_ref)
+            end_match = re.match(r"([A-Za-z]+)(\d+)", end_ref)
+            if not start_match or not end_match:
+                continue
+            start_col, start_row = start_match.group(1).upper(), int(start_match.group(2))
+            end_col, end_row = end_match.group(1).upper(), int(end_match.group(2))
+            if start_col != col_letter.upper() or end_col != col_letter.upper():
+                continue
+            low, high = sorted((start_row, end_row))
+            rows.extend(range(low, high + 1))
+        else:
+            single_ref = normalize_cell_ref(ref)
+            single_match = re.match(r"([A-Za-z]+)(\d+)", single_ref)
+            if not single_match:
+                continue
+            if single_match.group(1).upper() == col_letter.upper():
+                rows.append(int(single_match.group(2)))
+
+    return sorted(set(rows))
+
+
+def calculate_total_infrastructure_cost_from_formula(
+    formula: str | None,
+    budget_row_totals: dict[int, float],
+) -> float:
+    sum_rows = parse_sum_rows(formula, "H")
+    if not sum_rows:
+        values = list(budget_row_totals.values())
+        return float(pd.Series(values).fillna(0).sum())
+
+    values = [budget_row_totals.get(row, 0.0) for row in sum_rows]
+    return float(pd.Series(values).fillna(0).sum())
+
+
+if DATA_JSON_PATH.exists():
+    (
+        intro_title,
+        intro_text,
+        disclaimer,
+        defaults,
+        components_df,
+        source_df,
+        source_row_groups,
+        budget_to_source_blended_row,
+        section_3_formulas,
+    ) = load_budget_calculator_data_from_json(str(DATA_JSON_PATH), DATA_JSON_PATH.stat().st_mtime)
+elif WORKBOOK_PATH.exists():
+    (
+        intro_title,
+        intro_text,
+        disclaimer,
+        defaults,
+        components_df,
+        source_df,
+        source_row_groups,
+        budget_to_source_blended_row,
+        section_3_formulas,
+    ) = load_budget_calculator_data_from_workbook(
+        str(WORKBOOK_PATH),
+        WORKBOOK_PATH.stat().st_mtime,
+        str(DATA_JSON_PATH),
+    )
+else:
+    st.error("Neither JSON data file nor workbook file was found in the project root.")
+    st.stop()
 
 st.title("Networked Transport Infrastructure Budget Allocation Tool")
 st.caption(intro_title)
 st.write(intro_text)
-st.info(disclaimer)
+st.warning(disclaimer)
 
 st.markdown("## Section 1: Transport Project Inputs")
 left, right = st.columns([1, 1])
@@ -350,29 +628,35 @@ with left:
     total_budget_usd = st.number_input(
         "Total Transport Project Budget (USD)",
         min_value=0.0,
-        value=defaults["total_budget_usd"],
+        value=10_000_000.0,
         step=1000000.0,
+        format="%.0f",
     )
 
 with right:
-    allocation_pct = st.number_input(
+    allocation_pct_value = int(round(float(defaults["allocation_pct"]) * 100))
+    allocation_pct_value = max(1, min(100, allocation_pct_value))
+    allocation_pct_percent = st.slider(
         "% Allocated to RNTI / Rural Access",
-        min_value=0.0,
-        max_value=1.0,
-        value=defaults["allocation_pct"],
-        step=0.01,
-        format="%.2f",
-        help="Use decimal form (e.g., 0.07 for 7%).",
+        min_value=1,
+        max_value=100,
+        value=allocation_pct_value,
+        step=1,
+        help="Use whole-number percent (e.g., 7 for 7%).",
     )
-    maintenance_pct = st.number_input(
+    maintenance_pct_value = int(round(float(defaults["maintenance_pct"]) * 100))
+    maintenance_pct_value = max(1, min(100, maintenance_pct_value))
+    maintenance_pct_percent = st.slider(
         "Maintenance Reserve (%)",
-        min_value=0.0,
-        max_value=1.0,
-        value=defaults["maintenance_pct"],
-        step=0.01,
-        format="%.2f",
-        help="Recommended range in workbook: 5% to 15%.",
+        min_value=1,
+        max_value=100,
+        value=maintenance_pct_value,
+        step=1,
+        help="Recommended range in workbook: 5 to 15.",
     )
+
+allocation_pct = allocation_pct_percent / 100
+maintenance_pct = maintenance_pct_percent / 100
 
 rnti_budget = total_budget_usd * allocation_pct
 maintenance_amount = rnti_budget * maintenance_pct
@@ -559,6 +843,14 @@ summary_df["Total Cost Estimate Range"] = summary_df.apply(
     axis=1,
 )
 
+budget_row_mid_totals_series = to_numeric_series(
+    working_df.set_index("Budget Row")["Total Cost Estimate (Mid)"]
+).fillna(0)
+budget_row_mid_totals = {
+    int(row): float(value)
+    for row, value in budget_row_mid_totals_series.items()
+}
+
 st.markdown("### Cost Inputs Snapshot")
 st.caption("Quick view so Min Unit Cost is always visible.")
 st.dataframe(
@@ -583,7 +875,10 @@ st.dataframe(
 )
 
 st.markdown("## Section 3: Budget Summary")
-total_infrastructure_cost = summary_df["Total Cost Estimate (Mid)"].fillna(0).sum()
+total_infrastructure_cost = calculate_total_infrastructure_cost_from_formula(
+    section_3_formulas.get("total_infrastructure_cost"),
+    budget_row_mid_totals,
+)
 remaining_capital_budget = capital_budget - total_infrastructure_cost
 pct_capital_used = 0 if capital_budget == 0 else total_infrastructure_cost / capital_budget
 total_estimated_rnti_investment = total_infrastructure_cost + maintenance_amount
@@ -803,7 +1098,7 @@ if False:  # Keep Section 4 code for later, but hide it from the UI for now.
         st.rerun()
 
 with st.expander("Methodology and caveats"):
-    st.markdown(
+    st.warning(
         """
 - Unit costs are blended approximations from verifiable sources in the workbook.
 - Items with no verifiable source are intentionally left blank.
