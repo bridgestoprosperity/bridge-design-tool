@@ -913,15 +913,11 @@ for budget_row, qty_value in st.session_state.get("rnti_qty_overrides", {}).item
 editor_state = st.session_state.get("rnti_infra_editor", {})
 edited_rows = editor_state.get("edited_rows", {}) if isinstance(editor_state, dict) else {}
 
-# Map editor row indexes (which include section header rows) back to Budget Row.
-row_index_to_budget_row: dict[int, int | None] = {}
-editor_row_idx = 0
-for section in [s for s in working_df["Section"].dropna().unique()]:
-    row_index_to_budget_row[editor_row_idx] = None
-    editor_row_idx += 1
-    for _, row in working_df[working_df["Section"] == section].iterrows():
-        row_index_to_budget_row[editor_row_idx] = int(row["Budget Row"])
-        editor_row_idx += 1
+# Map editor row indexes directly to Budget Row (no inserted section header rows).
+row_index_to_budget_row: dict[int, int] = {
+    idx: int(row["Budget Row"])
+    for idx, (_, row) in enumerate(working_df.iterrows())
+}
 
 for row_idx, changes in edited_rows.items():
     if not isinstance(changes, dict) or "Qty" not in changes:
@@ -954,41 +950,8 @@ working_df["Total Cost Estimate Range"] = working_df.apply(
 )
 
 
-editor_rows = []
-for section in [s for s in working_df["Section"].dropna().unique()]:
-    editor_rows.append(
-        {
-            "#": None,
-            "Budget Row": None,
-            "Section": section,
-            "Infrastructure Type": section,
-            "Unit": None,
-            "Mid Unit Cost (USD)": None,
-            "Qty": None,
-            "Min Unit Cost (USD)": None,
-            "Max Unit Cost (USD)": None,
-            "Total Cost Estimate (Mid)": None,
-            "Total Cost Estimate Range": None,
-        }
-    )
-    for _, row in working_df[working_df["Section"] == section].iterrows():
-        editor_rows.append(
-            {
-                "#": row["#"],
-                "Budget Row": row["Budget Row"],
-                "Section": row["Section"],
-                "Infrastructure Type": row["Infrastructure Type"],
-                "Unit": row["Unit"],
-                "Mid Unit Cost (USD)": row["Mid Unit Cost (USD)"],
-                "Qty": row["Qty"],
-                "Min Unit Cost (USD)": row["Min Unit Cost (USD)"],
-                "Max Unit Cost (USD)": row["Max Unit Cost (USD)"],
-                "Total Cost Estimate (Mid)": row["Total Cost Estimate (Mid)"],
-                "Total Cost Estimate Range": row["Total Cost Estimate Range"],
-            }
-        )
-
-editor_df = pd.DataFrame(editor_rows)
+editor_df = working_df.copy()
+st.caption("Edit values in the highlighted ✏️ Quantity column.")
 
 editable_df = st.data_editor(
     editor_df,
@@ -997,22 +960,26 @@ editable_df = st.data_editor(
     num_rows="fixed",
     key="rnti_infra_editor",
     column_order=[
-        "Section",
         "Infrastructure Type",
         "Unit",
+        "Qty",
         "Min Unit Cost (USD)",
         "Max Unit Cost (USD)",
         "Mid Unit Cost (USD)",
-        "Qty",
         "Total Cost Estimate (Mid)",
         "Total Cost Estimate Range",
     ],
     column_config={
-        "Section": st.column_config.TextColumn(disabled=True),
         "Infrastructure Type": st.column_config.TextColumn(disabled=True, width="medium"),
         "Unit": st.column_config.TextColumn(disabled=True),
         "Mid Unit Cost (USD)": st.column_config.NumberColumn(disabled=True, format="$%0.0f"),
-        "Qty": st.column_config.NumberColumn(min_value=0.0, step=1.0, format="%.2f"),
+        "Qty": st.column_config.NumberColumn(
+            "✏️ Quantity",
+            min_value=0.0,
+            step=1.0,
+            format="%.2f",
+            help="Primary editable input",
+        ),
         "Min Unit Cost (USD)": st.column_config.NumberColumn(disabled=True, format="$%0.0f"),
         "Max Unit Cost (USD)": st.column_config.NumberColumn(disabled=True, format="$%0.0f"),
         "Total Cost Estimate (Mid)": st.column_config.NumberColumn(format="$%0.0f"),
@@ -1022,7 +989,6 @@ editable_df = st.data_editor(
 )
 
 summary_df = editable_df.copy()
-summary_df = summary_df[summary_df["Unit"].notna()].copy()
 summary_df["Min Unit Cost (USD)"] = to_numeric_series(summary_df["Min Unit Cost (USD)"])
 summary_df["Max Unit Cost (USD)"] = to_numeric_series(summary_df["Max Unit Cost (USD)"])
 summary_df["Mid Unit Cost (USD)"] = to_numeric_series(summary_df["Mid Unit Cost (USD)"])
@@ -1058,29 +1024,6 @@ budget_row_mid_totals = {
     int(row): float(value)
     for row, value in budget_row_mid_totals_series.items()
 }
-
-st.markdown("### Cost Inputs Snapshot")
-st.caption("Quick view so Min Unit Cost is always visible.")
-st.dataframe(
-    summary_df[
-        [
-            "Infrastructure Type",
-            "Qty",
-            "Min Unit Cost (USD)",
-            "Max Unit Cost (USD)",
-            "Mid Unit Cost (USD)",
-            "Total Cost Estimate (Mid)",
-        ]
-    ],
-    hide_index=True,
-    use_container_width=True,
-    column_config={
-        "Min Unit Cost (USD)": st.column_config.NumberColumn(format="$%0.0f"),
-        "Max Unit Cost (USD)": st.column_config.NumberColumn(format="$%0.0f"),
-        "Mid Unit Cost (USD)": st.column_config.NumberColumn(format="$%0.0f"),
-        "Total Cost Estimate (Mid)": st.column_config.NumberColumn(format="$%0.0f"),
-    },
-)
 
 st.markdown("## Section 3: Budget Summary")
 total_infrastructure_cost = calculate_total_infrastructure_cost_from_formula(
