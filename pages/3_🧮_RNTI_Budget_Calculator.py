@@ -924,6 +924,17 @@ def section_editor_key(section_name: str) -> str:
 
 sections = [s for s in working_df["Section"].dropna().unique()]
 
+if st.button("Reset all quantities to 0", key="rnti_reset_qty_btn"):
+    st.session_state["rnti_qty_overrides"] = {
+        int(budget_row): 0.0
+        for budget_row in working_df["Budget Row"].dropna().tolist()
+    }
+    for section in sections:
+        key = section_editor_key(str(section))
+        if key in st.session_state and isinstance(st.session_state[key], dict):
+            st.session_state[key]["edited_rows"] = {}
+    st.rerun()
+
 # Capture latest Qty edits from each section editor widget state.
 for section in sections:
     key = section_editor_key(str(section))
