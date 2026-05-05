@@ -7,9 +7,9 @@ import pandas as pd
 import streamlit as st
 from openpyxl import load_workbook
 
-st.set_page_config(page_title="RNTI Budget Calculator", page_icon="🧮", layout="wide")
+st.set_page_config(page_title="Rural Connectivity Budget Tool", page_icon="🧮", layout="wide")
 st.logo("./assets/fikalogo.png")
-st.sidebar.header("RNTI Budget Calculator")
+st.sidebar.header("Rural Connectivity Budget Tool")
 
 WORKBOOK_CANDIDATES = [
     Path("./data/Rural Connectivity Budget Tool.xlsx"),
@@ -775,9 +775,12 @@ else:
     st.error("Neither JSON data file nor workbook file was found in the project root.")
     st.stop()
 
-st.title("Networked Transport Infrastructure Budget Allocation Tool")
-st.caption(intro_title)
-st.write(intro_text)
+st.title("Rural Connectivity Budget Tool")
+intro_text_display = str(intro_text).replace(
+    "Segerberg & Noriega (2026)",
+    "[Segerberg & Noriega (2026)](https://www.mdpi.com/2071-1050/18/6/2842)",
+)
+st.markdown(intro_text_display)
 st.warning(disclaimer)
 
 st.markdown("## Section 1: Transport Project Inputs")
@@ -913,27 +916,42 @@ for budget_row, qty_value in st.session_state.get("rnti_qty_overrides", {}).item
 editor_state = st.session_state.get("rnti_infra_editor", {})
 edited_rows = editor_state.get("edited_rows", {}) if isinstance(editor_state, dict) else {}
 
-# Map editor row indexes directly to Budget Row (no inserted section header rows).
-row_index_to_budget_row: dict[int, int] = {
-    idx: int(row["Budget Row"])
-    for idx, (_, row) in enumerate(working_df.iterrows())
-}
 
-for row_idx, changes in edited_rows.items():
-    if not isinstance(changes, dict) or "Qty" not in changes:
-        continue
-    editor_idx = int(row_idx)
-    budget_row = row_index_to_budget_row.get(editor_idx)
-    if budget_row is None:
-        continue
-    target_idx = working_df[working_df["Budget Row"] == budget_row].index
-    if not target_idx.empty:
+def section_editor_key(section_name: str) -> str:
+    section_slug = re.sub(r"[^a-z0-9]+", "_", str(section_name).lower()).strip("_")
+    return f"rnti_infra_editor_{section_slug}"
+
+
+sections = [s for s in working_df["Section"].dropna().unique()]
+
+# Capture latest Qty edits from each section editor widget state.
+for section in sections:
+    key = section_editor_key(str(section))
+    section_state = st.session_state.get(key, {})
+    section_edited_rows = section_state.get("edited_rows", {}) if isinstance(section_state, dict) else {}
+
+    section_rows = working_df[working_df["Section"] == section].reset_index(drop=True)
+    row_index_to_budget_row = {
+        idx: int(row["Budget Row"])
+        for idx, (_, row) in enumerate(section_rows.iterrows())
+    }
+
+    for row_idx, changes in section_edited_rows.items():
+        if not isinstance(changes, dict) or "Qty" not in changes:
+            continue
+        budget_row = row_index_to_budget_row.get(int(row_idx))
+        if budget_row is None:
+            continue
         qty_value = to_numeric_series(pd.Series([changes["Qty"]])).iloc[0]
         if pd.isna(qty_value):
             qty_value = 0.0
-        qty_value = float(qty_value)
-        st.session_state["rnti_qty_overrides"][int(budget_row)] = qty_value
-        working_df.at[target_idx[0], "Qty"] = qty_value
+        st.session_state["rnti_qty_overrides"][int(budget_row)] = float(qty_value)
+
+# Re-apply persisted + newly captured Qty edits.
+for budget_row, qty_value in st.session_state.get("rnti_qty_overrides", {}).items():
+    row_idx = working_df[working_df["Budget Row"] == int(budget_row)].index
+    if not row_idx.empty:
+        working_df.at[row_idx[0], "Qty"] = qty_value
 
 working_df["Min Unit Cost (USD)"] = to_numeric_series(working_df["Min Unit Cost (USD)"])
 working_df["Max Unit Cost (USD)"] = to_numeric_series(working_df["Max Unit Cost (USD)"])
@@ -950,50 +968,82 @@ working_df["Total Cost Estimate Range"] = working_df.apply(
 )
 
 
-editor_df = working_df.copy()
+def display_section_heading(section_name: str) -> str:
+    mapping = {
+        "ORDER 3 TERTIARY LINKS": "TERTIARY LINKS",
+        "SUB-TERTIARY LINKS": "SUB-TERTIARY LINKS",
+        "ANCILLARY & SAFETY INFRASTRUCTURE": "ANCILLARY INFRASTRUCTURE",
+    }
+    return mapping.get(section_name, str(section_name).upper())
+
+
 st.caption("Edit values in the highlighted ✏️ Quantity column.")
 
-editable_df = st.data_editor(
-    editor_df,
-    hide_index=True,
-    use_container_width=True,
-    num_rows="fixed",
-    key="rnti_infra_editor",
-    column_order=[
-        "Infrastructure Type",
-        "Unit",
-        "Qty",
-        "Min Unit Cost (USD)",
-        "Max Unit Cost (USD)",
-        "Mid Unit Cost (USD)",
-        "Total Cost Estimate (Mid)",
-        "Total Cost Estimate Range",
-    ],
-    column_config={
-        "Infrastructure Type": st.column_config.TextColumn(disabled=True, width="medium"),
-        "Unit": st.column_config.TextColumn(disabled=True),
-        "Mid Unit Cost (USD)": st.column_config.NumberColumn(disabled=True, format="$%0.0f"),
-        "Qty": st.column_config.NumberColumn(
-            "✏️ Quantity",
-            min_value=0.0,
-            step=1.0,
-            format="%.2f",
-            help="Primary editable input",
+edited_section_frames: list[pd.DataFrame] = []
+for section in sections:
+    st.markdown(f"#### {display_section_heading(str(section))}")
+    section_editor_df = working_df[working_df["Section"] == section].copy()
+
+    edited_section_df = st.data_editor(
+        section_editor_df,
+        hide_index=True,
+        use_container_width=True,
+        num_rows="fixed",
+        key=section_editor_key(str(section)),
+        column_order=[
+            "Infrastructure Type",
+            "Unit",
+            "Qty",
+            "Min Unit Cost (USD)",
+            "Max Unit Cost (USD)",
+            "Mid Unit Cost (USD)",
+            "Total Cost Estimate (Mid)",
+            "Total Cost Estimate Range",
+        ],
+        column_config={
+            "Infrastructure Type": st.column_config.TextColumn(disabled=True, width="medium"),
+            "Unit": st.column_config.TextColumn(disabled=True),
+            "Mid Unit Cost (USD)": st.column_config.NumberColumn(disabled=True, format="$%0.0f"),
+            "Qty": st.column_config.NumberColumn(
+                "✏️ Quantity",
+                min_value=0.0,
+                step=1.0,
+                format="%.2f",
+                help="Primary editable input",
+            ),
+            "Min Unit Cost (USD)": st.column_config.NumberColumn(disabled=True, format="$%0.0f"),
+            "Max Unit Cost (USD)": st.column_config.NumberColumn(disabled=True, format="$%0.0f"),
+            "Total Cost Estimate (Mid)": st.column_config.NumberColumn(disabled=True, format="$%0.0f"),
+            "Total Cost Estimate Range": st.column_config.TextColumn(disabled=True),
+            "Budget Row": st.column_config.NumberColumn(disabled=True, format="%d"),
+            "Section": st.column_config.TextColumn(disabled=True),
+        },
+    )
+
+    edited_section_df["Min Unit Cost (USD)"] = to_numeric_series(edited_section_df["Min Unit Cost (USD)"])
+    edited_section_df["Max Unit Cost (USD)"] = to_numeric_series(edited_section_df["Max Unit Cost (USD)"])
+    edited_section_df["Mid Unit Cost (USD)"] = to_numeric_series(edited_section_df["Mid Unit Cost (USD)"])
+    edited_section_df["Qty"] = to_numeric_series(edited_section_df["Qty"]).fillna(0)
+    edited_section_df["Total Cost Estimate (Mid)"] = edited_section_df["Mid Unit Cost (USD)"] * edited_section_df["Qty"]
+    edited_section_df["Total Cost Estimate Range"] = edited_section_df.apply(
+        lambda row: calc_range_text(
+            row["Min Unit Cost (USD)"],
+            row["Max Unit Cost (USD)"],
+            row["Qty"],
         ),
-        "Min Unit Cost (USD)": st.column_config.NumberColumn(disabled=True, format="$%0.0f"),
-        "Max Unit Cost (USD)": st.column_config.NumberColumn(disabled=True, format="$%0.0f"),
-        "Total Cost Estimate (Mid)": st.column_config.NumberColumn(format="$%0.0f"),
-        "Total Cost Estimate Range": st.column_config.TextColumn(disabled=True),
-        "Budget Row": st.column_config.NumberColumn(disabled=True, format="%d"),
-    },
-)
+        axis=1,
+    )
+
+    edited_section_frames.append(edited_section_df)
+
+editable_df = pd.concat(edited_section_frames, ignore_index=True) if edited_section_frames else working_df.copy()
 
 summary_df = editable_df.copy()
 summary_df["Min Unit Cost (USD)"] = to_numeric_series(summary_df["Min Unit Cost (USD)"])
 summary_df["Max Unit Cost (USD)"] = to_numeric_series(summary_df["Max Unit Cost (USD)"])
 summary_df["Mid Unit Cost (USD)"] = to_numeric_series(summary_df["Mid Unit Cost (USD)"])
 summary_df["Qty"] = to_numeric_series(summary_df["Qty"]).fillna(0)
-summary_df["Total Cost Estimate (Mid)"] = to_numeric_series(summary_df["Total Cost Estimate (Mid)"]).fillna(0)
+summary_df["Total Cost Estimate (Mid)"] = summary_df["Mid Unit Cost (USD)"] * summary_df["Qty"]
 summary_df["Total Cost Estimate Range"] = summary_df.apply(
     lambda row: calc_range_text(
         row["Min Unit Cost (USD)"],
