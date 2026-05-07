@@ -1,3 +1,5 @@
+import json
+from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 import re
 
@@ -5,11 +7,16 @@ import pandas as pd
 import streamlit as st
 from openpyxl import load_workbook
 
-st.set_page_config(page_title="RNTI Budget Calculator", page_icon="🧮", layout="wide")
+st.set_page_config(page_title="Rural Connectivity Budget Tool", page_icon="🧮", layout="wide")
 st.logo("./assets/fikalogo.png")
-st.sidebar.header("RNTI Budget Calculator")
+st.sidebar.header("Rural Connectivity Budget Tool")
 
-WORKBOOK_PATH = Path("./Networked Transport Infrastructure Budget Allocation Tool V2.xlsx")
+WORKBOOK_CANDIDATES = [
+    Path("./data/Rural Connectivity Budget Tool.xlsx"),
+    Path("./Networked Transport Infrastructure Budget Allocation Tool V2.xlsx"),
+]
+WORKBOOK_PATH = next((path for path in WORKBOOK_CANDIDATES if path.exists()), WORKBOOK_CANDIDATES[0])
+DATA_JSON_PATH = Path("./data/rnti_budget_calculator_data.json")
 
 FALLBACK_SOURCE_ROW_GROUPS = {
     25: [7, 8, 9, 10],
@@ -38,7 +45,14 @@ FALLBACK_SOURCE_ROW_GROUPS = {
 }
 
 
-def parse_average_source_rows(formula: str | None, col_letter: str) -> list[int]:
+def normalize_cell_ref(ref: str) -> str:
+    ref = ref.strip().replace("$", "")
+    if "!" in ref:
+        ref = ref.split("!", 1)[1]
+    return ref
+
+
+def extract_average_refs(formula: str | None) -> list[str]:
     if not isinstance(formula, str) or "AVERAGE(" not in formula.upper():
         return []
 
@@ -46,46 +60,109 @@ def parse_average_source_rows(formula: str | None, col_letter: str) -> list[int]
     if not match:
         return []
 
-    inside = match.group(1).replace("$", "")
+    inside = match.group(1)
     refs = [part.strip() for part in inside.split(",") if part.strip()]
-    rows: list[int] = []
+    expanded: list[str] = []
 
     for ref in refs:
         if ":" in ref:
-            start_ref, end_ref = ref.split(":", 1)
-            start_match = re.search(rf"{col_letter}(\d+)", start_ref, flags=re.IGNORECASE)
-            end_match = re.search(rf"{col_letter}(\d+)", end_ref, flags=re.IGNORECASE)
-            if start_match and end_match:
-                start_row = int(start_match.group(1))
-                end_row = int(end_match.group(1))
-                low, high = sorted((start_row, end_row))
-                rows.extend(range(low, high + 1))
-        else:
-            single_match = re.search(rf"{col_letter}(\d+)", ref, flags=re.IGNORECASE)
-            if single_match:
-                rows.append(int(single_match.group(1)))
+            start_ref_raw, end_ref_raw = ref.split(":", 1)
+            start_ref = normalize_cell_ref(start_ref_raw)
+            end_ref = normalize_cell_ref(end_ref_raw)
+            start_match = re.match(r"([A-Za-z]+)(\d+)", start_ref)
+            end_match = re.match(r"([A-Za-z]+)(\d+)", end_ref)
+            if not start_match or not end_match:
+                continue
 
+            start_col, start_row = start_match.group(1).upper(), int(start_match.group(2))
+            end_col, end_row = end_match.group(1).upper(), int(end_match.group(2))
+            if start_col != end_col:
+                continue
+
+            low, high = sorted((start_row, end_row))
+            expanded.extend([f"{start_col}{row}" for row in range(low, high + 1)])
+        else:
+            single_ref = normalize_cell_ref(ref)
+            if re.match(r"[A-Za-z]+\d+", single_ref):
+                expanded.append(single_ref.upper())
+
+    return sorted(set(expanded))
+
+
+def extract_sheet_cell_row(formula: str | None, col_letter: str) -> int | None:
+    if not isinstance(formula, str):
+        return None
+    match = re.search(rf"!\$?{col_letter}(\d+)", formula, flags=re.IGNORECASE)
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def compile_excel_formula(formula: str | None):
+    """Compile selected Excel formulas into Python callables.
+
+    Supported patterns:
+    - IFERROR(ROUND(AVERAGE(...),0),"")
+    - IFERROR(ROUND((A1+B1)/2,0),"")
+    """
+    if not isinstance(formula, str):
+        return None
+
+    avg_refs = extract_average_refs(formula)
+    if avg_refs:
+        def eval_average(resolve_ref):
+            values = [resolve_ref(ref) for ref in avg_refs]
+            return calculate_blended_average(pd.Series(values))
+
+        return eval_average
+
+    normalized = formula.replace("$", "")
+    mid_match = re.search(
+        r"ROUND\(\s*\(?\s*([A-Za-z]+\d+)\s*\+\s*([A-Za-z]+\d+)\s*\)?\s*/\s*2\s*,\s*0\s*\)",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    if mid_match:
+        left_ref = normalize_cell_ref(mid_match.group(1)).upper()
+        right_ref = normalize_cell_ref(mid_match.group(2)).upper()
+
+        def eval_mid(resolve_ref):
+            return calculate_source_mid(resolve_ref(left_ref), resolve_ref(right_ref))
+
+        return eval_mid
+
+    return None
+
+
+def parse_average_source_rows(formula: str | None, col_letter: str) -> list[int]:
+    refs = extract_average_refs(formula)
+    rows: list[int] = []
+    for ref in refs:
+        match = re.match(r"([A-Za-z]+)(\d+)", ref)
+        if not match:
+            continue
+        col, row = match.group(1).upper(), int(match.group(2))
+        if col == col_letter.upper():
+            rows.append(row)
     return sorted(set(rows))
 
 
-def derive_source_row_groups(ws, ws_source) -> dict[int, list[int]]:
+def derive_source_row_groups(ws_budget_formula, ws_source_formula) -> dict[int, list[int]]:
     row_groups: dict[int, list[int]] = {}
 
     for row in range(24, 51):
-        item_number = ws[f"A{row}"].value
+        item_number = ws_budget_formula[f"A{row}"].value
         if item_number is None:
             continue
 
-        min_formula = ws[f"D{row}"].value
+        min_formula = ws_budget_formula[f"D{row}"].value
         source_rows: list[int] = []
 
-        if isinstance(min_formula, str):
-            blended_match = re.search(r"!\$?C(\d+)", min_formula)
-            if blended_match:
-                blended_row = int(blended_match.group(1))
-                source_rows = parse_average_source_rows(ws_source[f"C{blended_row}"].value, "C")
-                if not source_rows:
-                    source_rows = parse_average_source_rows(ws_source[f"D{blended_row}"].value, "D")
+        blended_row = extract_sheet_cell_row(min_formula, "C")
+        if blended_row is not None:
+            source_rows = parse_average_source_rows(ws_source_formula[f"C{blended_row}"].value, "C")
+            if not source_rows:
+                source_rows = parse_average_source_rows(ws_source_formula[f"D{blended_row}"].value, "D")
 
         if not source_rows:
             source_rows = FALLBACK_SOURCE_ROW_GROUPS.get(row, [])
@@ -96,18 +173,18 @@ def derive_source_row_groups(ws, ws_source) -> dict[int, list[int]]:
     return row_groups
 
 
-def derive_budget_to_source_blended_row(ws) -> dict[int, int]:
+def derive_budget_to_source_blended_row(ws_budget_formula) -> dict[int, int]:
     links: dict[int, int] = {}
     for row in range(24, 51):
-        item_number = ws[f"A{row}"].value
+        item_number = ws_budget_formula[f"A{row}"].value
         if item_number is None:
             continue
-        min_formula = ws[f"D{row}"].value
+        min_formula = ws_budget_formula[f"D{row}"].value
         if not isinstance(min_formula, str):
             continue
-        blended_match = re.search(r"!\$?C(\d+)", min_formula)
-        if blended_match:
-            links[row] = int(blended_match.group(1))
+        blended_row = extract_sheet_cell_row(min_formula, "C")
+        if blended_row is not None:
+            links[row] = blended_row
     return links
 
 
@@ -118,15 +195,83 @@ def source_group_display_order(source_row_groups: dict[int, list[int]]) -> list[
     )
 
 
+def normalize_json_value(value):
+    if value is None:
+        return None
+    if isinstance(value, (str, int, float, bool)):
+        if isinstance(value, float) and pd.isna(value):
+            return None
+        return value
+
+    try:
+        if pd.isna(value):
+            return None
+    except TypeError:
+        pass
+
+    if hasattr(value, "item"):
+        try:
+            return value.item()
+        except Exception:
+            return str(value)
+
+    return str(value)
+
+
+def dataframe_to_json_records(df: pd.DataFrame) -> list[dict]:
+    records = df.to_dict(orient="records")
+    return [
+        {k: normalize_json_value(v) for k, v in record.items()}
+        for record in records
+    ]
+
+
+def save_budget_data_json(
+    json_path: str,
+    intro_title: str,
+    intro_text: str,
+    disclaimer: str,
+    defaults: dict,
+    components_df: pd.DataFrame,
+    source_df: pd.DataFrame,
+    source_row_groups: dict[int, list[int]],
+    budget_to_source_blended_row: dict[int, int],
+    section_1_formulas: dict[str, str | None],
+    section_3_formulas: dict[str, str | None],
+):
+    json_file = Path(json_path)
+    json_file.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "intro_title": intro_title,
+        "intro_text": intro_text,
+        "disclaimer": disclaimer,
+        "defaults": defaults,
+        "components": dataframe_to_json_records(components_df),
+        "source": dataframe_to_json_records(source_df),
+        "source_row_groups": {str(k): v for k, v in source_row_groups.items()},
+        "budget_to_source_blended_row": {
+            str(k): v for k, v in budget_to_source_blended_row.items()
+        },
+        "section_1_formulas": section_1_formulas,
+        "section_3_formulas": section_3_formulas,
+    }
+    json_file.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
 @st.cache_data
-def load_budget_calculator_data(file_path: str, workbook_mtime: float):
+def load_budget_calculator_data_from_workbook(
+    file_path: str,
+    workbook_mtime: float,
+    json_path: str,
+):
     wb = load_workbook(file_path, data_only=True)
     wb_formula = load_workbook(file_path, data_only=False)
     ws = wb["Budget Calculator"]
     ws_source = wb["Source Data - In Progress"]
+    ws_formula = wb_formula["Budget Calculator"]
     ws_source_formula = wb_formula["Source Data - In Progress"]
-    source_row_groups = derive_source_row_groups(ws, ws_source)
-    budget_to_source_blended_row = derive_budget_to_source_blended_row(ws)
+    source_row_groups = derive_source_row_groups(ws_formula, ws_source_formula)
+    budget_to_source_blended_row = derive_budget_to_source_blended_row(ws_formula)
 
     def source_url_from_row(source_row: int):
         cell = ws_source_formula[f"F{source_row}"]
@@ -138,7 +283,36 @@ def load_budget_calculator_data(file_path: str, workbook_mtime: float):
             return f"#{cell.hyperlink.location}"
         return None
 
-    def blended_costs_from_source_rows(source_rows: list[int]):
+    def blended_costs_from_source_rows(source_rows: list[int], blended_row: int | None):
+        def resolve_source_ref(ref: str):
+            normalized_ref = normalize_cell_ref(ref)
+            return ws_source[normalized_ref].value
+
+        if blended_row is not None:
+            min_formula_fn = compile_excel_formula(ws_source_formula[f"C{blended_row}"].value)
+            max_formula_fn = compile_excel_formula(ws_source_formula[f"D{blended_row}"].value)
+            mid_formula_fn = compile_excel_formula(ws_source_formula[f"E{blended_row}"].value)
+
+            if min_formula_fn and max_formula_fn:
+                min_cost = min_formula_fn(resolve_source_ref)
+                max_cost = max_formula_fn(resolve_source_ref)
+                if mid_formula_fn:
+                    mid_cost = mid_formula_fn(resolve_source_ref)
+                else:
+                    mid_cost = calculate_source_mid(min_cost, max_cost)
+                return min_cost, max_cost, mid_cost
+
+            # Handles direct links like =IF('Source Data - In Progress'!C15="","",'Source Data - In Progress'!C15)
+            # where C/D/E are already the blended values in Source Data.
+            direct_min = ws_source[f"C{blended_row}"].value
+            direct_max = ws_source[f"D{blended_row}"].value
+            direct_mid = ws_source[f"E{blended_row}"].value
+
+            if direct_min is not None and direct_max is not None:
+                return direct_min, direct_max, calculate_source_mid(direct_min, direct_max)
+            if direct_min is not None:
+                return direct_min, direct_min, direct_mid if direct_mid is not None else direct_min
+
         low_values = [ws_source[f"C{r}"].value for r in source_rows]
         high_values = [ws_source[f"D{r}"].value for r in source_rows]
 
@@ -159,6 +333,22 @@ def load_budget_calculator_data(file_path: str, workbook_mtime: float):
         "maintenance_pct": float(ws["C16"].value or 0),
     }
 
+    section_1_formulas = {
+        "rnti_budget_available": ws_formula["C14"].value,
+        "maintenance_reserve_amount": ws_formula["C17"].value,
+        "capital_budget_for_infrastructure": ws_formula["C18"].value,
+    }
+
+    section_3_formulas = {
+        "total_infrastructure_cost": ws_formula["C55"].value,
+        "capital_budget_available": ws_formula["C56"].value,
+        "remaining_capital_budget": ws_formula["C57"].value,
+        "pct_capital_budget_used": ws_formula["C58"].value,
+        "maintenance_reserve": ws_formula["C59"].value,
+        "total_estimated_rnti_investment": ws_formula["C60"].value,
+        "pct_total_corridor_project": ws_formula["C61"].value,
+    }
+
     section_name = ""
     items = []
     for row in range(24, 51):
@@ -173,7 +363,8 @@ def load_budget_calculator_data(file_path: str, workbook_mtime: float):
             continue
 
         source_rows = source_row_groups.get(row, [])
-        min_cost, max_cost, mid_cost = blended_costs_from_source_rows(source_rows)
+        blended_row = extract_sheet_cell_row(ws_formula[f"D{row}"].value, "C")
+        min_cost, max_cost, mid_cost = blended_costs_from_source_rows(source_rows, blended_row)
 
         items.append(
             {
@@ -225,6 +416,20 @@ def load_budget_calculator_data(file_path: str, workbook_mtime: float):
             )
 
     source_df = pd.DataFrame(source_records)
+    save_budget_data_json(
+        json_path,
+        intro_title,
+        intro_text,
+        disclaimer,
+        defaults,
+        components_df,
+        source_df,
+        source_row_groups,
+        budget_to_source_blended_row,
+        section_1_formulas,
+        section_3_formulas,
+    )
+
     return (
         intro_title,
         intro_text,
@@ -234,6 +439,41 @@ def load_budget_calculator_data(file_path: str, workbook_mtime: float):
         source_df,
         source_row_groups,
         budget_to_source_blended_row,
+        section_1_formulas,
+        section_3_formulas,
+    )
+
+
+@st.cache_data
+def load_budget_calculator_data_from_json(json_path: str, json_mtime: float):
+    payload = json.loads(Path(json_path).read_text(encoding="utf-8"))
+    intro_title = payload.get("intro_title", "")
+    intro_text = payload.get("intro_text", "")
+    disclaimer = payload.get("disclaimer", "")
+    defaults = payload.get("defaults", {})
+    components_df = pd.DataFrame(payload.get("components", []))
+    source_df = pd.DataFrame(payload.get("source", []))
+    source_row_groups = {
+        int(k): v for k, v in payload.get("source_row_groups", {}).items()
+    }
+    budget_to_source_blended_row = {
+        int(k): int(v)
+        for k, v in payload.get("budget_to_source_blended_row", {}).items()
+    }
+    section_1_formulas = payload.get("section_1_formulas", {})
+    section_3_formulas = payload.get("section_3_formulas", {})
+
+    return (
+        intro_title,
+        intro_text,
+        disclaimer,
+        defaults,
+        components_df,
+        source_df,
+        source_row_groups,
+        budget_to_source_blended_row,
+        section_1_formulas,
+        section_3_formulas,
     )
 
 
@@ -250,6 +490,12 @@ def to_numeric_series(values: pd.Series) -> pd.Series:
         values.astype(str).str.replace(r"[\$,]", "", regex=True).str.strip(),
         errors="coerce",
     )
+
+
+def excel_round(value: float, digits: int = 0) -> float:
+    """Mimic Excel ROUND behavior (half away from zero)."""
+    quantize_exp = Decimal("1").scaleb(-digits)
+    return float(Decimal(str(value)).quantize(quantize_exp, rounding=ROUND_HALF_UP))
 
 
 def build_average_formula(col_letter: str, rows: list[int]) -> str:
@@ -311,72 +557,295 @@ def calculate_source_mid(low_value, high_value):
     high_num = to_numeric_series(pd.Series([high_value])).iloc[0]
     if pd.isna(low_num) or pd.isna(high_num):
         return pd.NA
-    return float(round((low_num + high_num) / 2, 0))
+    return excel_round((low_num + high_num) / 2, 0)
 
 
 def calculate_blended_average(values: pd.Series):
     numeric_values = to_numeric_series(values).dropna()
     if numeric_values.empty:
         return pd.NA
-    return float(round(numeric_values.mean(), 0))
+    return excel_round(numeric_values.mean(), 0)
 
 
-if not WORKBOOK_PATH.exists():
-    st.error("Workbook file not found in the project root.")
+def parse_sum_rows(formula: str | None, col_letter: str) -> list[int]:
+    if not isinstance(formula, str) or "SUM(" not in formula.upper():
+        return []
+
+    match = re.search(r"SUM\((.*?)\)", formula, flags=re.IGNORECASE)
+    if not match:
+        return []
+
+    refs = [part.strip() for part in match.group(1).split(",") if part.strip()]
+    rows: list[int] = []
+    for ref in refs:
+        if ":" in ref:
+            start_ref_raw, end_ref_raw = ref.split(":", 1)
+            start_ref = normalize_cell_ref(start_ref_raw)
+            end_ref = normalize_cell_ref(end_ref_raw)
+            start_match = re.match(r"([A-Za-z]+)(\d+)", start_ref)
+            end_match = re.match(r"([A-Za-z]+)(\d+)", end_ref)
+            if not start_match or not end_match:
+                continue
+            start_col, start_row = start_match.group(1).upper(), int(start_match.group(2))
+            end_col, end_row = end_match.group(1).upper(), int(end_match.group(2))
+            if start_col != col_letter.upper() or end_col != col_letter.upper():
+                continue
+            low, high = sorted((start_row, end_row))
+            rows.extend(range(low, high + 1))
+        else:
+            single_ref = normalize_cell_ref(ref)
+            single_match = re.match(r"([A-Za-z]+)(\d+)", single_ref)
+            if not single_match:
+                continue
+            if single_match.group(1).upper() == col_letter.upper():
+                rows.append(int(single_match.group(2)))
+
+    return sorted(set(rows))
+
+
+def calculate_total_infrastructure_cost_from_formula(
+    formula: str | None,
+    budget_row_totals: dict[int, float],
+) -> float:
+    sum_rows = parse_sum_rows(formula, "H")
+    if not sum_rows:
+        values = list(budget_row_totals.values())
+        return float(pd.Series(values).fillna(0).sum())
+
+    matched_values = [budget_row_totals[row] for row in sum_rows if row in budget_row_totals]
+    if matched_values:
+        return float(pd.Series(matched_values).fillna(0).sum())
+
+    # Fallback if row keys are unavailable from the editor output.
+    values = list(budget_row_totals.values())
+    return float(pd.Series(values).fillna(0).sum())
+
+
+def unwrap_iferror_expression(expression: str) -> str:
+    expr = expression.strip()
+    if not expr.upper().startswith("IFERROR(") or not expr.endswith(")"):
+        return expr
+
+    inner = expr[len("IFERROR("):-1]
+    depth = 0
+    for i, ch in enumerate(inner):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            return inner[:i].strip()
+
+    return inner.strip()
+
+
+def evaluate_excel_numeric_formula(
+    formula: str | None,
+    cell_values: dict[str, float],
+    fallback: float,
+) -> float:
+    if not isinstance(formula, str) or not formula.strip():
+        return float(fallback)
+
+    expression = formula.strip()
+    if expression.startswith("="):
+        expression = expression[1:]
+
+    expression = unwrap_iferror_expression(expression).replace("$", "")
+
+    def replace_ref(match: re.Match) -> str:
+        ref = match.group(1).upper()
+        value = cell_values.get(ref, 0.0)
+        return str(float(value or 0.0))
+
+    expression = re.sub(r"\b([A-Za-z]+\d+)\b", replace_ref, expression)
+    expression = expression.replace("^", "**")
+
+    if not re.fullmatch(r"[0-9\.\+\-\*\/\(\)\s]+", expression):
+        return float(fallback)
+
+    try:
+        return float(eval(expression, {"__builtins__": {}}, {}))
+    except Exception:
+        return float(fallback)
+
+
+def split_top_level_args(arg_string: str) -> list[str]:
+    args: list[str] = []
+    current = []
+    depth = 0
+    for ch in arg_string:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        if ch == "," and depth == 0:
+            args.append("".join(current).strip())
+            current = []
+            continue
+        current.append(ch)
+    if current:
+        args.append("".join(current).strip())
+    return args
+
+
+def evaluate_excel_if_formula(
+    formula: str | None,
+    cell_values: dict[str, float],
+    fallback: float,
+) -> float:
+    if not isinstance(formula, str):
+        return float(fallback)
+
+    expression = formula.strip()
+    if expression.startswith("="):
+        expression = expression[1:]
+    expression = unwrap_iferror_expression(expression)
+
+    if not expression.upper().startswith("IF(") or not expression.endswith(")"):
+        return evaluate_excel_numeric_formula(formula, cell_values, fallback)
+
+    inner = expression[3:-1]
+    args = split_top_level_args(inner)
+    if len(args) != 3:
+        return float(fallback)
+
+    condition_expr, true_expr, false_expr = args
+    condition_match = re.match(r"^\s*([A-Za-z]+\d+)\s*([=<>]+)\s*([-]?[0-9]*\.?[0-9]+)\s*$", condition_expr)
+    if not condition_match:
+        return float(fallback)
+
+    ref = condition_match.group(1).upper()
+    op = condition_match.group(2)
+    rhs = float(condition_match.group(3))
+    lhs = float(cell_values.get(ref, 0.0) or 0.0)
+
+    is_true = False
+    if op == "=":
+        is_true = lhs == rhs
+    elif op == "<>":
+        is_true = lhs != rhs
+    elif op == ">":
+        is_true = lhs > rhs
+    elif op == "<":
+        is_true = lhs < rhs
+    elif op == ">=":
+        is_true = lhs >= rhs
+    elif op == "<=":
+        is_true = lhs <= rhs
+
+    selected_expr = true_expr if is_true else false_expr
+    return evaluate_excel_numeric_formula(f"={selected_expr}", cell_values, fallback)
+
+
+workbook_exists = WORKBOOK_PATH.exists()
+json_exists = DATA_JSON_PATH.exists()
+
+if workbook_exists:
+    (
+        intro_title,
+        intro_text,
+        disclaimer,
+        defaults,
+        components_df,
+        source_df,
+        source_row_groups,
+        budget_to_source_blended_row,
+        section_1_formulas,
+        section_3_formulas,
+    ) = load_budget_calculator_data_from_workbook(
+        str(WORKBOOK_PATH),
+        WORKBOOK_PATH.stat().st_mtime,
+        str(DATA_JSON_PATH),
+    )
+elif json_exists:
+    (
+        intro_title,
+        intro_text,
+        disclaimer,
+        defaults,
+        components_df,
+        source_df,
+        source_row_groups,
+        budget_to_source_blended_row,
+        section_1_formulas,
+        section_3_formulas,
+    ) = load_budget_calculator_data_from_json(str(DATA_JSON_PATH), DATA_JSON_PATH.stat().st_mtime)
+else:
+    st.error("Neither JSON data file nor workbook file was found in the project root.")
     st.stop()
 
-(
-    intro_title,
-    intro_text,
-    disclaimer,
-    defaults,
-    components_df,
-    source_df,
-    source_row_groups,
-    budget_to_source_blended_row,
-) = load_budget_calculator_data(str(WORKBOOK_PATH), WORKBOOK_PATH.stat().st_mtime)
-
-st.title("Networked Transport Infrastructure Budget Allocation Tool")
-st.caption(intro_title)
-st.write(intro_text)
-st.info(disclaimer)
+st.title("Rural Connectivity Budget Tool")
+intro_text_display = str(intro_text).replace(
+    "Segerberg & Noriega (2026)",
+    "[Segerberg & Noriega (2026)](https://www.mdpi.com/2071-1050/18/6/2842)",
+)
+st.markdown(intro_text_display)
+st.warning(disclaimer)
 
 st.markdown("## Section 1: Transport Project Inputs")
 left, right = st.columns([1, 1])
 
 with left:
-    st.text_input("Project Name / Description", value="")
-    st.text_input("Country / Region", value="")
+    st.text_input("Project Name / Description", value=str(defaults.get("project_name", "")))
+    st.text_input("Country / Region", value=str(defaults.get("country_region", "")))
     total_budget_usd = st.number_input(
         "Total Transport Project Budget (USD)",
         min_value=0.0,
-        value=defaults["total_budget_usd"],
+        value=float(defaults.get("total_budget_usd", 0.0)),
         step=1000000.0,
+        format="%.0f",
     )
 
 with right:
-    allocation_pct = st.number_input(
+    allocation_pct_value = int(round(float(defaults["allocation_pct"]) * 100))
+    allocation_pct_value = max(0, min(100, allocation_pct_value))
+    allocation_pct_percent = st.slider(
         "% Allocated to RNTI / Rural Access",
-        min_value=0.0,
-        max_value=1.0,
-        value=defaults["allocation_pct"],
-        step=0.01,
-        format="%.2f",
-        help="Use decimal form (e.g., 0.07 for 7%).",
+        min_value=0,
+        max_value=100,
+        value=allocation_pct_value,
+        step=1,
+        help="Use whole-number percent (e.g., 7 for 7%).",
     )
-    maintenance_pct = st.number_input(
+    maintenance_pct_value = int(round(float(defaults["maintenance_pct"]) * 100))
+    maintenance_pct_value = max(0, min(100, maintenance_pct_value))
+    maintenance_pct_percent = st.slider(
         "Maintenance Reserve (%)",
-        min_value=0.0,
-        max_value=1.0,
-        value=defaults["maintenance_pct"],
-        step=0.01,
-        format="%.2f",
-        help="Recommended range in workbook: 5% to 15%.",
+        min_value=0,
+        max_value=100,
+        value=maintenance_pct_value,
+        step=1,
+        help="Recommended range in workbook: 5 to 15.",
     )
 
-rnti_budget = total_budget_usd * allocation_pct
-maintenance_amount = rnti_budget * maintenance_pct
-capital_budget = rnti_budget - maintenance_amount
+allocation_pct = allocation_pct_percent / 100
+maintenance_pct = maintenance_pct_percent / 100
+
+section_1_cells = {
+    "C12": float(total_budget_usd),
+    "C13": float(allocation_pct),
+    "C16": float(maintenance_pct),
+}
+rnti_budget = evaluate_excel_numeric_formula(
+    section_1_formulas.get("rnti_budget_available"),
+    section_1_cells,
+    fallback=float(total_budget_usd * allocation_pct),
+)
+section_1_cells["C14"] = float(rnti_budget)
+
+maintenance_amount = evaluate_excel_numeric_formula(
+    section_1_formulas.get("maintenance_reserve_amount"),
+    section_1_cells,
+    fallback=float(rnti_budget * maintenance_pct),
+)
+section_1_cells["C17"] = float(maintenance_amount)
+
+capital_budget = evaluate_excel_numeric_formula(
+    section_1_formulas.get("capital_budget_for_infrastructure"),
+    section_1_cells,
+    fallback=float(rnti_budget - maintenance_amount),
+)
 
 k1, k2, k3 = st.columns(3)
 k1.metric("RNTI Budget Available", f"${rnti_budget:,.0f}")
@@ -387,6 +856,8 @@ if "rnti_source_data_df" not in st.session_state:
     st.session_state["rnti_source_data_df"] = source_df.copy()
 if "rnti_blended_overrides" not in st.session_state:
     st.session_state["rnti_blended_overrides"] = {}
+if "rnti_qty_overrides" not in st.session_state:
+    st.session_state["rnti_qty_overrides"] = {}
 active_source_df = st.session_state["rnti_source_data_df"].copy()
 
 blended_summary_df = build_blended_summary_table(active_source_df, source_row_groups)
@@ -414,19 +885,6 @@ blended_summary_df["Blended Mid (USD)"] = blended_summary_df.apply(
     axis=1,
 )
 
-# Workbook formula-link emulation test (row 25 only):
-# Budget Calculator D25/E25/F25 should mirror Source blended C12/D12/E12 logic.
-if 25 in budget_to_source_blended_row:
-    row_25_subset = active_source_df[active_source_df["Budget Row"] == 25]
-    row_25_low = calculate_blended_average(row_25_subset["Low Est. (USD)"])
-    row_25_high = calculate_blended_average(row_25_subset["High Est. (USD)"])
-    row_25_mid = calculate_source_mid(row_25_low, row_25_high)
-    row_25_idx = blended_summary_df[blended_summary_df["Budget Row"] == 25].index
-    if not row_25_idx.empty:
-        blended_summary_df.at[row_25_idx[0], "Blended Min (USD)"] = row_25_low
-        blended_summary_df.at[row_25_idx[0], "Blended Max (USD)"] = row_25_high
-        blended_summary_df.at[row_25_idx[0], "Blended Mid (USD)"] = row_25_mid
-
 blended_override = {}
 for _, row in blended_summary_df.iterrows():
     budget_row = int(row["Budget Row"])
@@ -446,23 +904,65 @@ for idx in components_df.index:
         components_df.at[idx, "Mid Unit Cost (USD)"] = mid_cost
 
 st.markdown("## Section 2: Infrastructure Mix")
-if 25 in budget_to_source_blended_row:
-    linked_row = budget_to_source_blended_row[25]
-    st.caption(
-        f"Formula-link test active: Budget row 25 mirrors Source blended row {linked_row} "
-        "(equivalent to D25<-C12, E25<-D12, F25<-E12 style chaining)."
-    )
 
 working_df = components_df.copy()
 
+# Re-apply persisted Qty edits so multiple row edits are retained across reruns.
+for budget_row, qty_value in st.session_state.get("rnti_qty_overrides", {}).items():
+    row_idx = working_df[working_df["Budget Row"] == int(budget_row)].index
+    if not row_idx.empty:
+        working_df.at[row_idx[0], "Qty"] = qty_value
+
 editor_state = st.session_state.get("rnti_infra_editor", {})
 edited_rows = editor_state.get("edited_rows", {}) if isinstance(editor_state, dict) else {}
-for row_idx, changes in edited_rows.items():
-    if not isinstance(changes, dict) or "Qty" not in changes:
-        continue
-    idx = int(row_idx)
-    if 0 <= idx < len(working_df):
-        working_df.at[idx, "Qty"] = changes["Qty"]
+
+
+def section_editor_key(section_name: str) -> str:
+    section_slug = re.sub(r"[^a-z0-9]+", "_", str(section_name).lower()).strip("_")
+    return f"rnti_infra_editor_{section_slug}"
+
+
+sections = [s for s in working_df["Section"].dropna().unique()]
+
+if st.button("Reset all quantities to 0", key="rnti_reset_qty_btn"):
+    st.session_state["rnti_qty_overrides"] = {
+        int(budget_row): 0.0
+        for budget_row in working_df["Budget Row"].dropna().tolist()
+    }
+    for section in sections:
+        key = section_editor_key(str(section))
+        if key in st.session_state and isinstance(st.session_state[key], dict):
+            st.session_state[key]["edited_rows"] = {}
+    st.rerun()
+
+# Capture latest Qty edits from each section editor widget state.
+for section in sections:
+    key = section_editor_key(str(section))
+    section_state = st.session_state.get(key, {})
+    section_edited_rows = section_state.get("edited_rows", {}) if isinstance(section_state, dict) else {}
+
+    section_rows = working_df[working_df["Section"] == section].reset_index(drop=True)
+    row_index_to_budget_row = {
+        idx: int(row["Budget Row"])
+        for idx, (_, row) in enumerate(section_rows.iterrows())
+    }
+
+    for row_idx, changes in section_edited_rows.items():
+        if not isinstance(changes, dict) or "Qty" not in changes:
+            continue
+        budget_row = row_index_to_budget_row.get(int(row_idx))
+        if budget_row is None:
+            continue
+        qty_value = to_numeric_series(pd.Series([changes["Qty"]])).iloc[0]
+        if pd.isna(qty_value):
+            qty_value = 0.0
+        st.session_state["rnti_qty_overrides"][int(budget_row)] = float(qty_value)
+
+# Re-apply persisted + newly captured Qty edits.
+for budget_row, qty_value in st.session_state.get("rnti_qty_overrides", {}).items():
+    row_idx = working_df[working_df["Budget Row"] == int(budget_row)].index
+    if not row_idx.empty:
+        working_df.at[row_idx[0], "Qty"] = qty_value
 
 working_df["Min Unit Cost (USD)"] = to_numeric_series(working_df["Min Unit Cost (USD)"])
 working_df["Max Unit Cost (USD)"] = to_numeric_series(working_df["Max Unit Cost (USD)"])
@@ -479,72 +979,77 @@ working_df["Total Cost Estimate Range"] = working_df.apply(
 )
 
 
-editor_rows = []
-for section in [s for s in working_df["Section"].dropna().unique()]:
-    editor_rows.append(
-        {
-            "#": None,
-            "Section": section,
-            "Infrastructure Type": section,
-            "Unit": None,
-            "Mid Unit Cost (USD)": None,
-            "Qty": None,
-            "Min Unit Cost (USD)": None,
-            "Max Unit Cost (USD)": None,
-            "Total Cost Estimate (Mid)": None,
-            "Total Cost Estimate Range": None,
-        }
+def display_section_heading(section_name: str) -> str:
+    mapping = {
+        "ORDER 3 TERTIARY LINKS": "TERTIARY LINKS",
+        "SUB-TERTIARY LINKS": "SUB-TERTIARY LINKS",
+        "ANCILLARY & SAFETY INFRASTRUCTURE": "ANCILLARY INFRASTRUCTURE",
+    }
+    return mapping.get(section_name, str(section_name).upper())
+
+
+st.caption("Edit values in the highlighted ✏️ Quantity column.")
+
+edited_section_frames: list[pd.DataFrame] = []
+for section in sections:
+    st.markdown(f"#### {display_section_heading(str(section))}")
+    section_editor_df = working_df[working_df["Section"] == section].copy()
+
+    edited_section_df = st.data_editor(
+        section_editor_df,
+        hide_index=True,
+        use_container_width=True,
+        num_rows="fixed",
+        key=section_editor_key(str(section)),
+        column_order=[
+            "Infrastructure Type",
+            "Unit",
+            "Qty",
+            "Min Unit Cost (USD)",
+            "Max Unit Cost (USD)",
+            "Mid Unit Cost (USD)",
+            "Total Cost Estimate (Mid)",
+            "Total Cost Estimate Range",
+        ],
+        column_config={
+            "Infrastructure Type": st.column_config.TextColumn(disabled=True, width="medium"),
+            "Unit": st.column_config.TextColumn(disabled=True),
+            "Mid Unit Cost (USD)": st.column_config.NumberColumn(disabled=True, format="$%0.0f"),
+            "Qty": st.column_config.NumberColumn(
+                "✏️ Quantity",
+                min_value=0.0,
+                step=1.0,
+                format="%.2f",
+                help="Primary editable input",
+            ),
+            "Min Unit Cost (USD)": st.column_config.NumberColumn(disabled=True, format="$%0.0f"),
+            "Max Unit Cost (USD)": st.column_config.NumberColumn(disabled=True, format="$%0.0f"),
+            "Total Cost Estimate (Mid)": st.column_config.NumberColumn(disabled=True, format="$%0.0f"),
+            "Total Cost Estimate Range": st.column_config.TextColumn(disabled=True),
+            "Budget Row": st.column_config.NumberColumn(disabled=True, format="%d"),
+            "Section": st.column_config.TextColumn(disabled=True),
+        },
     )
-    for _, row in working_df[working_df["Section"] == section].iterrows():
-        editor_rows.append(
-            {
-                "#": row["#"],
-                "Section": row["Section"],
-                "Infrastructure Type": row["Infrastructure Type"],
-                "Unit": row["Unit"],
-                "Mid Unit Cost (USD)": row["Mid Unit Cost (USD)"],
-                "Qty": row["Qty"],
-                "Min Unit Cost (USD)": row["Min Unit Cost (USD)"],
-                "Max Unit Cost (USD)": row["Max Unit Cost (USD)"],
-                "Total Cost Estimate (Mid)": row["Total Cost Estimate (Mid)"],
-                "Total Cost Estimate Range": row["Total Cost Estimate Range"],
-            }
-        )
 
-editor_df = pd.DataFrame(editor_rows)
+    edited_section_df["Min Unit Cost (USD)"] = to_numeric_series(edited_section_df["Min Unit Cost (USD)"])
+    edited_section_df["Max Unit Cost (USD)"] = to_numeric_series(edited_section_df["Max Unit Cost (USD)"])
+    edited_section_df["Mid Unit Cost (USD)"] = to_numeric_series(edited_section_df["Mid Unit Cost (USD)"])
+    edited_section_df["Qty"] = to_numeric_series(edited_section_df["Qty"]).fillna(0)
+    edited_section_df["Total Cost Estimate (Mid)"] = edited_section_df["Mid Unit Cost (USD)"] * edited_section_df["Qty"]
+    edited_section_df["Total Cost Estimate Range"] = edited_section_df.apply(
+        lambda row: calc_range_text(
+            row["Min Unit Cost (USD)"],
+            row["Max Unit Cost (USD)"],
+            row["Qty"],
+        ),
+        axis=1,
+    )
 
-editable_df = st.data_editor(
-    editor_df,
-    hide_index=True,
-    use_container_width=True,
-    num_rows="fixed",
-    key="rnti_infra_editor",
-    column_order=[
-        "Section",
-        "Infrastructure Type",
-        "Unit",
-        "Min Unit Cost (USD)",
-        "Max Unit Cost (USD)",
-        "Mid Unit Cost (USD)",
-        "Qty",
-        "Total Cost Estimate (Mid)",
-        "Total Cost Estimate Range",
-    ],
-    column_config={
-        "Section": st.column_config.TextColumn(disabled=True),
-        "Infrastructure Type": st.column_config.TextColumn(disabled=True, width="medium"),
-        "Unit": st.column_config.TextColumn(disabled=True),
-        "Mid Unit Cost (USD)": st.column_config.NumberColumn(disabled=True, format="$%0.0f"),
-        "Qty": st.column_config.NumberColumn(min_value=0.0, step=1.0, format="%.2f"),
-        "Min Unit Cost (USD)": st.column_config.NumberColumn(disabled=True, format="$%0.0f"),
-        "Max Unit Cost (USD)": st.column_config.NumberColumn(disabled=True, format="$%0.0f"),
-        "Total Cost Estimate (Mid)": st.column_config.NumberColumn(disabled=True, format="$%0.0f"),
-        "Total Cost Estimate Range": st.column_config.TextColumn(disabled=True),
-    },
-)
+    edited_section_frames.append(edited_section_df)
+
+editable_df = pd.concat(edited_section_frames, ignore_index=True) if edited_section_frames else working_df.copy()
 
 summary_df = editable_df.copy()
-summary_df = summary_df[summary_df["Unit"].notna()].copy()
 summary_df["Min Unit Cost (USD)"] = to_numeric_series(summary_df["Min Unit Cost (USD)"])
 summary_df["Max Unit Cost (USD)"] = to_numeric_series(summary_df["Max Unit Cost (USD)"])
 summary_df["Mid Unit Cost (USD)"] = to_numeric_series(summary_df["Mid Unit Cost (USD)"])
@@ -559,44 +1064,94 @@ summary_df["Total Cost Estimate Range"] = summary_df.apply(
     axis=1,
 )
 
-st.markdown("### Cost Inputs Snapshot")
-st.caption("Quick view so Min Unit Cost is always visible.")
-st.dataframe(
-    summary_df[
-        [
-            "Infrastructure Type",
-            "Qty",
-            "Min Unit Cost (USD)",
-            "Max Unit Cost (USD)",
-            "Mid Unit Cost (USD)",
-            "Total Cost Estimate (Mid)",
-        ]
-    ],
-    hide_index=True,
-    use_container_width=True,
-    column_config={
-        "Min Unit Cost (USD)": st.column_config.NumberColumn(format="$%0.0f"),
-        "Max Unit Cost (USD)": st.column_config.NumberColumn(format="$%0.0f"),
-        "Mid Unit Cost (USD)": st.column_config.NumberColumn(format="$%0.0f"),
-        "Total Cost Estimate (Mid)": st.column_config.NumberColumn(format="$%0.0f"),
-    },
+budget_row_mid_totals_source = summary_df.copy()
+if "Budget Row" not in budget_row_mid_totals_source.columns:
+    budget_row_mid_totals_source["Budget Row"] = pd.NA
+
+budget_row_mid_totals_source["Budget Row"] = to_numeric_series(
+    budget_row_mid_totals_source["Budget Row"]
 )
+if budget_row_mid_totals_source["Budget Row"].isna().all() and len(components_df) == len(budget_row_mid_totals_source):
+    budget_row_mid_totals_source["Budget Row"] = components_df["Budget Row"].values
+
+budget_row_mid_totals_source = budget_row_mid_totals_source[
+    budget_row_mid_totals_source["Budget Row"].notna()
+].copy()
+budget_row_mid_totals_series = (
+    budget_row_mid_totals_source.set_index("Budget Row")["Total Cost Estimate (Mid)"]
+    .fillna(0)
+)
+budget_row_mid_totals = {
+    int(row): float(value)
+    for row, value in budget_row_mid_totals_series.items()
+}
 
 st.markdown("## Section 3: Budget Summary")
-total_infrastructure_cost = summary_df["Total Cost Estimate (Mid)"].fillna(0).sum()
-remaining_capital_budget = capital_budget - total_infrastructure_cost
-pct_capital_used = 0 if capital_budget == 0 else total_infrastructure_cost / capital_budget
-total_estimated_rnti_investment = total_infrastructure_cost + maintenance_amount
-pct_of_total_project = 0 if total_budget_usd == 0 else total_estimated_rnti_investment / total_budget_usd
+total_infrastructure_cost = calculate_total_infrastructure_cost_from_formula(
+    section_3_formulas.get("total_infrastructure_cost"),
+    budget_row_mid_totals,
+)
 
-s1, s2, s3 = st.columns(3)
+section_3_cells = {
+    "C12": float(total_budget_usd),
+    "C14": float(rnti_budget),
+    "C17": float(maintenance_amount),
+    "C18": float(capital_budget),
+    "C55": float(total_infrastructure_cost),
+}
+
+capital_budget_available = evaluate_excel_numeric_formula(
+    section_3_formulas.get("capital_budget_available"),
+    section_3_cells,
+    fallback=float(capital_budget),
+)
+section_3_cells["C56"] = float(capital_budget_available)
+
+remaining_capital_budget = evaluate_excel_numeric_formula(
+    section_3_formulas.get("remaining_capital_budget"),
+    section_3_cells,
+    fallback=float(capital_budget_available - total_infrastructure_cost),
+)
+section_3_cells["C57"] = float(remaining_capital_budget)
+
+pct_capital_used = evaluate_excel_if_formula(
+    section_3_formulas.get("pct_capital_budget_used"),
+    section_3_cells,
+    fallback=0.0 if capital_budget == 0 else float(total_infrastructure_cost / capital_budget),
+)
+section_3_cells["C58"] = float(pct_capital_used)
+
+maintenance_reserve = evaluate_excel_numeric_formula(
+    section_3_formulas.get("maintenance_reserve"),
+    section_3_cells,
+    fallback=float(maintenance_amount),
+)
+section_3_cells["C59"] = float(maintenance_reserve)
+
+total_estimated_rnti_investment = evaluate_excel_numeric_formula(
+    section_3_formulas.get("total_estimated_rnti_investment"),
+    section_3_cells,
+    fallback=float(total_infrastructure_cost + maintenance_reserve),
+)
+section_3_cells["C60"] = float(total_estimated_rnti_investment)
+
+pct_of_total_project = evaluate_excel_if_formula(
+    section_3_formulas.get("pct_total_corridor_project"),
+    section_3_cells,
+    fallback=0.0 if total_budget_usd == 0 else float(total_estimated_rnti_investment / total_budget_usd),
+)
+section_3_cells["C61"] = float(pct_of_total_project)
+
+s1, s2, s3, s4 = st.columns(4)
 s1.metric("Total Infrastructure Cost (Mid-Point Estimate)", f"${total_infrastructure_cost:,.0f}")
-s2.metric("Remaining Capital Budget", f"${remaining_capital_budget:,.0f}")
-s3.metric("% of Capital Budget Used", f"{pct_capital_used:.1%}")
+s2.metric("Capital Budget Available", f"${capital_budget_available:,.0f}")
+s3.metric("Remaining Capital Budget", f"${remaining_capital_budget:,.0f}")
+s4.metric("% of Capital Budget Used", f"{pct_capital_used:.1%}")
 
-s4, s5 = st.columns(2)
-s4.metric("Maintenance Reserve", f"${maintenance_amount:,.0f}")
-s5.metric("% of Total Corridor Project", f"{pct_of_total_project:.1%}")
+s5, s6, s7 = st.columns(3)
+s5.metric("Maintenance Reserve", f"${maintenance_reserve:,.0f}")
+s6.metric("Total Estimated RNTI Investment", f"${total_estimated_rnti_investment:,.0f}")
+s7.metric("% of Total Corridor Project", f"{pct_of_total_project:.4%}")
 
 if remaining_capital_budget < 0:
     st.error(
@@ -628,7 +1183,7 @@ st.dataframe(
     },
 )
 
-with st.expander("Section 4: Source Data and Formula Inputs", expanded=False):
+if False:  # Keep Section 4 code for later, but hide it from the UI for now.
     st.markdown("### RNTI COST SOURCE DATA — Verifiable Sources with Integrated Blended Averages")
 
     grouped_source_frames = []
@@ -803,7 +1358,7 @@ with st.expander("Section 4: Source Data and Formula Inputs", expanded=False):
         st.rerun()
 
 with st.expander("Methodology and caveats"):
-    st.markdown(
+    st.warning(
         """
 - Unit costs are blended approximations from verifiable sources in the workbook.
 - Items with no verifiable source are intentionally left blank.
